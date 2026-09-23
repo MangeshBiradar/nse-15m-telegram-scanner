@@ -2,70 +2,56 @@ name: Weekly Stock Scanner
 
 on:
   workflow_dispatch:
-
   schedule:
     # Friday 17:30 IST = 12:00 UTC
     - cron: "0 12 * * 5"
 
-# Allow GitHub Actions to update state.json and push it back
 permissions:
   contents: write
+
+concurrency:
+  group: weekly-stock-scanner
+  cancel-in-progress: false
 
 jobs:
   scan:
     runs-on: ubuntu-latest
-
+    timeout-minutes: 45
     steps:
-      # ---------------------------------------------------------
-      # 1. Checkout repository
-      # ---------------------------------------------------------
       - name: Checkout repository
         uses: actions/checkout@v4
         with:
           fetch-depth: 0
           persist-credentials: true
 
-      # ---------------------------------------------------------
-      # 2. Setup Python
-      # ---------------------------------------------------------
       - name: Setup Python
         uses: actions/setup-python@v5
         with:
           python-version: "3.11"
           cache: "pip"
 
-      # ---------------------------------------------------------
-      # 3. Install dependencies
-      # ---------------------------------------------------------
       - name: Install dependencies
         run: |
           python -m pip install --upgrade pip
           pip install -r requirements.txt
 
-      # ---------------------------------------------------------
-      # 4. Run scanner
-      # ---------------------------------------------------------
+      - name: Refresh NSE + BSE universe
+        run: python universe.py
+
       - name: Run weekly stock scanner
         env:
           TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
           TELEGRAM_CHAT_ID: ${{ secrets.TELEGRAM_CHAT_ID }}
-        run: |
-          python scanner.py
+        run: python scanner.py
 
-      # ---------------------------------------------------------
-      # 5. Save updated scanner state
-      # ---------------------------------------------------------
-      - name: Commit scanner state
+      - name: Commit updated universe and state
         run: |
           git config user.name "github-actions[bot]"
           git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
-
-          git add state.json
-
+          git add symbols.csv state.json
           if git diff --cached --quiet; then
-            echo "No changes to state.json"
+            echo "No changes to commit"
           else
-            git commit -m "Update weekly scanner state"
+            git commit -m "Update scanner universe and state"
             git push
           fi
-          
