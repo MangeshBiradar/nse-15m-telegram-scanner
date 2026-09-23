@@ -179,13 +179,34 @@ def send_failure_alert(reason, scanned, total, duration):
 
 def main():
     started = time.monotonic()
-    u = pd.read_csv("symbols.csv")
+    try:
+        u = pd.read_csv("symbols.csv")
+    except Exception as e:
+        # Self-heal a missing/corrupt universe using the V2 refresh logic.
+        from universe import refresh
+        print("Universe file unavailable; attempting refresh:", e)
+        u = refresh("symbols.csv")
+
+    if "YF_TICKER" not in u.columns:
+        from universe import refresh
+        print("YF_TICKER column missing; rebuilding universe")
+        u = refresh("symbols.csv")
+
+    ts = (u["YF_TICKER"].dropna().astype(str).str.strip()
+          .loc[lambda x: x.ne("") & x.ne("nan")].unique().tolist())
+    if not ts:
+        # A stale/empty committed CSV should not result in a pointless 0-stock run.
+        from universe import refresh
+        print("Universe is empty; attempting automatic refresh")
+        u = refresh("symbols.csv")
+        ts = (u["YF_TICKER"].dropna().astype(str).str.strip()
+              .loc[lambda x: x.ne("") & x.ne("nan")].unique().tolist())
+
     state = load()
-    ts = u.YF_TICKER.dropna().astype(str).unique().tolist()
     total = len(ts)
     print("Scanning", total, "eligible stocks")
     if total == 0:
-        raise RuntimeError("Universe is empty. Run refresh_universe.yml or restore symbols.csv.")
+        raise RuntimeError("Universe is empty after automatic refresh; check NSE/BSE endpoints and symbols.csv.")
 
     failed = 0
     scanned = 0

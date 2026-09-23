@@ -95,7 +95,16 @@ def bse():
                 r = S.get(u, timeout=30, headers={**S.headers, "Referer": "https://www.bseindia.com/"})
                 r.raise_for_status()
                 x = r.json()
-                rows = x.get("Table") or x.get("Table1") or x
+                # BSE endpoints have returned both dict and list payloads over time.
+                # Never assume the JSON root is a dict.
+                if isinstance(x, dict):
+                    rows = x.get("Table") or x.get("Table1") or x.get("data") or []
+                elif isinstance(x, list):
+                    rows = x
+                else:
+                    rows = []
+                if isinstance(rows, dict):
+                    rows = rows.get("Table") or rows.get("Table1") or rows.get("data") or []
                 d = pd.DataFrame(rows)
                 d.columns = [str(c).strip().upper() for c in d.columns]
 
@@ -177,7 +186,10 @@ def refresh(path="symbols.csv"):
     d["SYMBOL"] = d.SYMBOL.fillna("").astype(str).str.strip().str.upper()
     d["_key"] = d.ISIN
     d.loc[d._key.eq(""), "_key"] = d.NAME.str.upper().str.replace(r"[^A-Z0-9]", "", regex=True)
-    d["BSE_CODE"] = d.get("BSE_CODE", "").fillna("").astype(str).str.extract(r"(\d+)")[0].fillna("")
+    if "BSE_CODE" in d.columns:
+        d["BSE_CODE"] = d["BSE_CODE"].fillna("").astype(str).str.extract(r"(\d+)")[0].fillna("")
+    else:
+        d["BSE_CODE"] = ""
     d["YF_TICKER"] = d.apply(
         lambda r: r.SYMBOL + ".NS" if r.EXCHANGE == "NSE" else r.BSE_CODE + ".BO", axis=1
     )
