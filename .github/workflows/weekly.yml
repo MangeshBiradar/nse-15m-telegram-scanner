@@ -1,23 +1,71 @@
 name: Weekly Stock Scanner
+
 on:
   workflow_dispatch:
+
   schedule:
-    - cron: "30 11 * * 5"  # Friday 17:00 IST; use next completed week on next run
+    # Friday 17:30 IST = 12:00 UTC
+    - cron: "0 12 * * 5"
+
+# Allow GitHub Actions to update state.json and push it back
+permissions:
+  contents: write
+
 jobs:
   scan:
     runs-on: ubuntu-latest
+
     steps:
-      - uses: actions/checkout@v4
-      - uses: actions/setup-python@v5
-        with: {python-version: "3.12", cache: pip}
-      - run: pip install -r requirements.txt
-      - run: python scanner.py
+      # ---------------------------------------------------------
+      # 1. Checkout repository
+      # ---------------------------------------------------------
+      - name: Checkout repository
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+          persist-credentials: true
+
+      # ---------------------------------------------------------
+      # 2. Setup Python
+      # ---------------------------------------------------------
+      - name: Setup Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+          cache: "pip"
+
+      # ---------------------------------------------------------
+      # 3. Install dependencies
+      # ---------------------------------------------------------
+      - name: Install dependencies
+        run: |
+          python -m pip install --upgrade pip
+          pip install -r requirements.txt
+
+      # ---------------------------------------------------------
+      # 4. Run scanner
+      # ---------------------------------------------------------
+      - name: Run weekly stock scanner
         env:
           TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
           TELEGRAM_CHAT_ID: ${{ secrets.TELEGRAM_CHAT_ID }}
-      - run: |
+        run: |
+          python scanner.py
+
+      # ---------------------------------------------------------
+      # 5. Save updated scanner state
+      # ---------------------------------------------------------
+      - name: Commit scanner state
+        run: |
           git config user.name "github-actions[bot]"
           git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+
           git add state.json
-          git diff --cached --quiet || git commit -m "Update weekly scanner state"
-          git push
+
+          if git diff --cached --quiet; then
+            echo "No changes to state.json"
+          else
+            git commit -m "Update weekly scanner state"
+            git push
+          fi
+          
