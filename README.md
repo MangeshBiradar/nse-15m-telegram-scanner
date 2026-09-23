@@ -1,25 +1,21 @@
-# NSE + BSE Weekly Stock Scanner
+# NSE+BSE 15-Minute Intraday Scanner V2
 
-Automated GitHub Actions scanner for eligible Indian equity shares.
+Runs the requested weekly-condition scanner every 15 minutes during Indian market hours.
+
+Schedule: 09:15 through 15:30 IST, Monday-Friday, using GitHub Actions cron. GitHub cron is best-effort and may be delayed.
 
 Conditions:
-1. Weekly Close >= Weekly Supertrend(10,3)
-2. Weekly Close >= Weekly Upper Bollinger Band(20,2)
-3. Weekly RSI(14) >= 60
-4. Previous trading day's Close < 20-day SMA
-5. NSE + BSE equity universe, excluding ETFs, indices, REITs/InvITs, preference shares, warrants and other non-ordinary instruments.
+1. Latest completed weekly Close >= Weekly Supertrend(10,3)
+2. Latest completed weekly Close >= Weekly Upper Bollinger Band(20,2)
+3. Latest completed weekly RSI(14) >= 60
+4. Previous trading day's Close < its 20-day SMA
 
-The workflow refreshes the universe before every scan and stores it in symbols.csv. Price history is retrieved with yfinance. Unavailable Yahoo symbols are skipped so one bad ticker does not stop the scan.
+The universe is refreshed once per day, then cached in symbols.csv. The scanner uses the cached universe on each 15-minute run.
 
-GitHub repository setup:
-Settings -> Actions -> General -> Workflow permissions -> Read and write permissions.
+IMPORTANT: yfinance is a third-party data source. This is a low-cost prototype, not exchange-grade real-time infrastructure. GitHub Actions cron and Yahoo Finance data can be delayed or unavailable. For true 15-minute intraday execution/alerts, a broker or market-data API is more reliable.
 
-Secrets:
+GitHub repository Settings -> Actions -> General -> Workflow permissions -> Read and write permissions.
+
+Required repository secrets:
 TELEGRAM_BOT_TOKEN
 TELEGRAM_CHAT_ID
-
-Manual run:
-Actions -> Weekly Stock Scanner -> Run workflow.
-
-Schedule:
-Friday 17:30 IST (12:00 UTC). GitHub scheduled jobs may be delayed.
