@@ -29,16 +29,27 @@ def save(x):
 
 
 def tg(msg):
+    """Send Telegram alert without ever crashing the scanner."""
     t, c = os.getenv("TELEGRAM_BOT_TOKEN"), os.getenv("TELEGRAM_CHAT_ID")
     if not t or not c:
-        print(msg)
-        return
-    r = requests.post(
-        f"https://api.telegram.org/bot{t}/sendMessage",
-        json={"chat_id": c, "text": msg},
-        timeout=20,
-    )
-    r.raise_for_status()
+        print("Telegram: NOT CONFIGURED (TELEGRAM_BOT_TOKEN/TELEGRAM_CHAT_ID missing)")
+        return False
+    try:
+        r = requests.post(
+            f"https://api.telegram.org/bot{t}/sendMessage",
+            json={"chat_id": c, "text": msg},
+            timeout=20,
+        )
+        if r.ok:
+            print("Telegram: sent")
+            return True
+        print(f"Telegram: FAILED HTTP {r.status_code}: {r.text[:500]}")
+        if r.status_code == 403:
+            print("Telegram hint: verify bot token, chat ID, and that the bot can send messages to the target chat.")
+        return False
+    except Exception as e:
+        print(f"Telegram: FAILED: {e}")
+        return False
 
 
 def flatten(d):
@@ -145,7 +156,7 @@ def send_success_alert(scanned, condition_matches, fresh_signals, failed, durati
                 f"   Previous SMA20: {s['sma20']:.2f}",
             ])
 
-    tg("\n".join(lines))
+    return tg("\n".join(lines))
 
 
 def send_failure_alert(reason, scanned, total, duration):
@@ -163,7 +174,7 @@ def send_failure_alert(reason, scanned, total, duration):
         "",
         "🤖 Data: yfinance",
     ])
-    tg(msg)
+    return tg(msg)
 
 
 def main():
@@ -173,6 +184,8 @@ def main():
     ts = u.YF_TICKER.dropna().astype(str).unique().tolist()
     total = len(ts)
     print("Scanning", total, "eligible stocks")
+    if total == 0:
+        raise RuntimeError("Universe is empty. Run refresh_universe.yml or restore symbols.csv.")
 
     failed = 0
     scanned = 0
@@ -245,5 +258,8 @@ if __name__ == "__main__":
         main()
     except Exception as e:
         elapsed = time.monotonic() - globals().get("started", time.monotonic())
-        send_failure_alert(str(e), 0, 0, elapsed)
+        try:
+            send_failure_alert(str(e), 0, 0, elapsed)
+        except Exception as alert_error:
+            print("Failure alert could not be sent:", alert_error)
         raise
