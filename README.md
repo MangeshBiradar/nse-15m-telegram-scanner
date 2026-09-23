@@ -19,3 +19,9 @@ GitHub repository Settings -> Actions -> General -> Workflow permissions -> Read
 Required repository secrets:
 TELEGRAM_BOT_TOKEN
 TELEGRAM_CHAT_ID
+
+## Telegram alerts (V2)
+Each run sends a Telegram summary with IST timestamp, status, run type, stocks scanned, matches, new alerts, failures/skips, duration, strategy conditions, and detailed match metrics. The data source remains **yfinance**.
+
+## Schedule
+GitHub Actions runs at approximately **09:15 AM IST** and **03:00 PM IST**, Monday-Friday. `workflow_dispatch` remains available for manual runs.
