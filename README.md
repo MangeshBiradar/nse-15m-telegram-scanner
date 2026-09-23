@@ -1,36 +1,25 @@
-# NSE/BSE Weekly Scanner
+# NSE + BSE Weekly Stock Scanner
 
-Exact requested logic:
+Automated GitHub Actions scanner for eligible Indian equity shares.
 
-- Weekly Close >= Weekly Supertrend
-- Weekly Close >= Weekly Bollinger Upper Band
-- Weekly RSI >= 60
-- 1-day-ago Daily Close < Daily 20 SMA
+Conditions:
+1. Weekly Close >= Weekly Supertrend(10,3)
+2. Weekly Close >= Weekly Upper Bollinger Band(20,2)
+3. Weekly RSI(14) >= 60
+4. Previous trading day's Close < 20-day SMA
+5. NSE + BSE equity universe, excluding ETFs, indices, REITs/InvITs, preference shares, warrants and other non-ordinary instruments.
 
-The scanner evaluates the latest **completed weekly candle** and uses the daily
-condition exactly as a daily condition. It sends only fresh signals and stores
-the signalled week per symbol in state.json.
+The workflow refreshes the universe before every scan and stores it in symbols.csv. Price history is retrieved with yfinance. Unavailable Yahoo symbols are skipped so one bad ticker does not stop the scan.
 
-## Universe
-The included symbols.csv is only a starter fallback. Replace it with your
-full universe generated from exchange security-master files.
+GitHub repository setup:
+Settings -> Actions -> General -> Workflow permissions -> Read and write permissions.
 
-For NSE, the official securities page separates the equity-segment CSV from
-ETF, REIT/InvIT, debt, preference-share, warrants and other categories.
-Therefore use the equity-share/security-master list rather than a broad
-instrument list.
+Secrets:
+TELEGRAM_BOT_TOKEN
+TELEGRAM_CHAT_ID
 
-For BSE, use the BSE equity security master and exclude ETF, MF, index,
-debt, preference, warrants, rights and other non-equity instruments.
+Manual run:
+Actions -> Weekly Stock Scanner -> Run workflow.
 
-## Data caveat
-yfinance is used for a zero-cost prototype. It is not an exchange-grade feed.
-Validate signals against your broker/chart before trading.
-
-## Telegram
-Set TELEGRAM_BOT_TOKEN and TELEGRAM_CHAT_ID as environment variables or GitHub
-Actions secrets.
-
-## Run
-pip install -r requirements.txt
-python scanner.py
+Schedule:
+Friday 17:30 IST (12:00 UTC). GitHub scheduled jobs may be delayed.

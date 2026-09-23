@@ -1,124 +1,65 @@
+import os,json,time,math,requests,pandas as pd,yfinance as yf
+from indicators import supertrend,rsi,bollinger_upper,sma
+from universe import refresh
 
-import json, os, time
-from pathlib import Path
-import pandas as pd
-import requests, yfinance as yf
-from dotenv import load_dotenv
-from indicators import wilder_rma, supertrend, rsi_wilder, bollinger
+STATE="state.json"; BATCH=40
 
-load_dotenv()
-TOKEN=os.getenv("TELEGRAM_BOT_TOKEN","").strip()
-CHAT_ID=os.getenv("TELEGRAM_CHAT_ID","").strip()
-STATE=Path("state.json")
-ATR_PERIOD=int(os.getenv("ATR_PERIOD","10"))
-ATR_MULT=float(os.getenv("ATR_MULTIPLIER","3"))
-RSI_PERIOD=int(os.getenv("RSI_PERIOD","14"))
-BB_PERIOD=int(os.getenv("BB_PERIOD","20"))
-BB_STD=float(os.getenv("BB_STD","2"))
+def load():
+    try:return json.load(open(STATE,encoding="utf-8"))
+    except:return {}
+def save(x):
+    tmp=STATE+".tmp"; json.dump(x,open(tmp,"w",encoding="utf-8"),indent=2); os.replace(tmp,STATE)
 
-def telegram(msg):
-    if not TOKEN or not CHAT_ID: raise RuntimeError("Telegram secrets missing")
-    r=requests.post(f"https://api.telegram.org/bot{TOKEN}/sendMessage",
-                    data={"chat_id":CHAT_ID,"text":msg},timeout=20)
-    r.raise_for_status()
+def tg(msg):
+    t,c=os.getenv("TELEGRAM_BOT_TOKEN"),os.getenv("TELEGRAM_CHAT_ID")
+    if not t or not c: print(msg); return
+    r=requests.post(f"https://api.telegram.org/bot{t}/sendMessage",json={"chat_id":c,"text":msg},timeout=20); r.raise_for_status()
 
-def symbols():
-    d=pd.read_csv("symbols.csv")
-    return sorted(set(d.symbol.dropna().astype(str).str.strip().str.upper()))
+def flat(d):
+    if isinstance(d.columns,pd.MultiIndex):
+        d.columns=[x[0] if isinstance(x,tuple) else x for x in d.columns]
+    return d
 
-def load_state():
-    try: return json.loads(STATE.read_text())
-    except: return {}
+def weekly(d):
+    d=d.copy(); d.index=pd.to_datetime(d.index)
+    w=d.resample("W-FRI").agg({"Open":"first","High":"max","Low":"min","Close":"last","Volume":"sum"}).dropna(subset=["Close"])
+    now=pd.Timestamp.now(tz="Asia/Kolkata").tz_localize(None).normalize()
+    if len(w) and w.index[-1].normalize()>=now: w=w.iloc[:-1]
+    return w
 
-def save_state(s): STATE.write_text(json.dumps(s,indent=2))
-
-def frame(symbol):
-    d=yf.download(symbol+".NS", period="5y", interval="1d",
-                  auto_adjust=False, progress=False, threads=False)
-    if d is None or d.empty: return None
-    if isinstance(d.columns,pd.MultiIndex): d=d.xs(symbol+".NS",axis=1,level=-1)
-    return d[["Open","High","Low","Close","Volume"]].dropna()
-
-def evaluate(symbol,d):
-    if d is None or len(d)<100: return None
-    # Daily indicators are calculated first. Weekly values are formed from
-    # completed daily OHLC bars, then resampled to Friday-ending weekly bars.
-    w=d.resample("W-FRI").agg({"Open":"first","High":"max","Low":"min","Close":"last","Volume":"sum"}).dropna()
-    if len(w)<60: return None
-    st=supertrend(w,ATR_PERIOD,ATR_MULT)
-    rsi=rsi_wilder(w.Close,RSI_PERIOD)
-    _,bb_up,_=bollinger(w.Close,BB_PERIOD,BB_STD)
-    # User's "1-day-ago Close < 20 SMA" is a DAILY condition.
-    daily_sma20=d.Close.rolling(20).mean()
-    last_day=d.iloc[-1]
-    prev_day=d.iloc[-2]
-    daily_condition=prev_day.Close < daily_sma20.iloc[-2]
-
-    cur=w.iloc[-1]
-    # Avoid using a partially formed weekly candle during the trading week.
-    # For a true completed-week scan, use the previous weekly bar.
-    # We therefore evaluate the latest COMPLETED weekly bar.
-    idx=len(w)-2
-    if idx<1: return None
-    wc=w.iloc[idx]
-    wst=float(st.supertrend.iloc[idx])
-    wrsi=float(rsi.iloc[idx])
-    wbb=float(bb_up.iloc[idx])
-    conditions={
-      "weekly_close_ge_supertrend": float(wc.Close)>=wst,
-      "weekly_close_ge_bb": float(wc.Close)>=wbb,
-      "weekly_rsi_ge_60": wrsi>=60,
-      "1d_ago_close_lt_daily_sma20": daily_condition
-    }
-    all_now=all(conditions.values())
-    # Previous completed week, with the same daily 1-day-ago test relative
-    # to that week ending date, to identify a fresh weekly signal.
-    prev_idx=idx-1
-    prev_date=w.index[prev_idx]
-    prev_days=d.loc[d.index<=prev_date]
-    if len(prev_days)>=2:
-        pd1=prev_days.iloc[-2]
-        psma=pd1.Close >= prev_days.Close.rolling(20).mean().iloc[-2] if len(prev_days)>=20 else True
-        prev_daily=(pd1.Close < prev_days.Close.rolling(20).mean().iloc[-2]) if len(prev_days)>=20 else False
-    else: prev_daily=False
-    prev_cond=[
-      float(w.iloc[prev_idx].Close)>=float(st.supertrend.iloc[prev_idx]),
-      float(w.iloc[prev_idx].Close)>=float(bb_up.iloc[prev_idx]),
-      float(rsi.iloc[prev_idx])>=60,
-      prev_daily
-    ]
-    fresh=all_now and not all(prev_cond)
-    return {"symbol":symbol,"week":str(w.index[idx].date()),
-            "close":float(wc.Close),"supertrend":wst,"bb":wbb,"rsi":wrsi,
-            "daily_prev_close":float(prev_day.Close),
-            "daily_sma20":float(daily_sma20.iloc[-2]),
-            "all":all_now,"fresh":fresh}
+def check(t,d):
+    if d is None or d.empty:return None
+    d=flat(d).dropna(subset=["Open","High","Low","Close"])
+    if len(d)<120:return None
+    w=weekly(d)
+    if len(w)<60:return None
+    st=supertrend(w,10,3); rr=rsi(w.Close,14); bb=bollinger_upper(w.Close,20,2)
+    wc=float(w.Close.iloc[-1]); ws=float(st.iloc[-1]); wr=float(rr.iloc[-1]); wb=float(bb.iloc[-1])
+    pc=float(d.Close.iloc[-2]); ps=float(sma(d.Close,20).iloc[-2])
+    vals=[wc,ws,wr,wb,pc,ps]
+    if not all(math.isfinite(x) for x in vals):return None
+    if not (wc>=ws and wc>=wb and wr>=60 and pc<ps):return None
+    return {"ticker":t,"week":str(w.index[-1].date()),"close":wc,"st":ws,"bb":wb,"rsi":wr,"prev":pc,"sma20":ps}
 
 def main():
-    st=load_state(); hits=[]
-    for i,sym in enumerate(symbols(),1):
-        try:
-            r=evaluate(sym,frame(sym))
-            if r and r["fresh"] and st.get(sym)!=r["week"]:
-                hits.append(r); st[sym]=r["week"]
-        except Exception as e: print(sym,e)
-        if i%25==0: print(i)
-        time.sleep(.15)
-    save_state(st)
-    if hits:
-        msg=["🚨 WEEKLY MOMENTUM SIGNALS",""]
-        for x in hits:
-            msg += [f"📈 {x['symbol']}",f"Week: {x['week']}",
-                    f"Weekly Close: ₹{x['close']:.2f}",
-                    f"Weekly Supertrend: ₹{x['supertrend']:.2f}",
-                    f"Weekly BB Upper: ₹{x['bb']:.2f}",
-                    f"Weekly RSI: {x['rsi']:.2f}",
-                    f"1D-ago Close: ₹{x['daily_prev_close']:.2f}",
-                    f"20 SMA: ₹{x['daily_sma20']:.2f}","",
-                    "✅ W Close >= W Supertrend","✅ W Close >= W BB",
-                    "✅ W RSI >= 60","✅ 1D-ago Close < 20 SMA",""]
-        telegram("\n".join(msg))
-    print("Fresh signals:",len(hits))
+    u=refresh("symbols.csv"); state=load(); tickers=u.YF_TICKER.dropna().astype(str).unique().tolist()
+    print("Scanning",len(tickers),"eligible stocks")
+    fresh=0; failures=0
+    for i in range(0,len(tickers),BATCH):
+        batch=tickers[i:i+BATCH]
+        try:data=yf.download(batch,period="5y",interval="1d",group_by="ticker",auto_adjust=False,progress=False,threads=True)
+        except Exception as e: print("Batch failed:",e); failures+=len(batch); continue
+        for t in batch:
+            try:
+                d=data if len(batch)==1 else (data[t] if t in data.columns.get_level_values(0) else None)
+                s=check(t,d)
+                if not s:continue
+                key=t+"|"+s["week"]
+                if state.get(key):continue
+                tg(f"📈 WEEKLY SCANNER SIGNAL\\n\\nSymbol: {t}\\nWeek: {s['week']}\\n\\nWeekly Close: {s['close']:.2f}\\nSupertrend(10,3): {s['st']:.2f}\\nUpper BB(20,2): {s['bb']:.2f}\\nWeekly RSI(14): {s['rsi']:.2f}\\nPrev Close: {s['prev']:.2f}\\nPrev SMA20: {s['sma20']:.2f}\\n\\nAll 4 conditions matched.")
+                state[key]=True; fresh+=1
+            except Exception as e: failures+=1; print(t,"skipped:",e)
+        time.sleep(1)
+    save(state); print("Universe:",len(tickers)); print("Failed/skipped:",failures); print("Fresh signals:",fresh)
 
-if __name__=="__main__":
-    main()
+if __name__=="__main__":main()
