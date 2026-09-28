@@ -3,11 +3,11 @@ name: NSE+BSE Scanner
 on:
   workflow_dispatch:
   schedule:
-    # 09:15 AM IST
-    - cron: "45 3 * * 1-5"
+    # 09:15 AM IST (03:45 UTC)
+    - cron: "47 3 * * 1-5"
 
-    # 03:00 PM IST
-    - cron: "30 9 * * 1-5"
+    # 03:00 PM IST (09:30 UTC)
+    - cron: "32 9 * * 1-5"
 
 permissions:
   contents: write
