@@ -1,0 +1,45 @@
+name: NSE+BSE Universe Daily Refresh
+
+on:
+  workflow_dispatch:
+  schedule:
+    # 08:45 IST = 03:15 UTC, once each weekday before NSE opens.
+    - cron: "15 3 * * 1-5"
+
+permissions:
+  contents: write
+
+jobs:
+  refresh:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Setup Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - name: Install dependencies
+        run: |
+          python -m pip install --upgrade pip
+          pip install -r requirements.txt
+
+      - name: Refresh NSE+BSE stock universe
+        run: |
+          python universe.py
+
+      - name: Commit refreshed universe
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add symbols.csv
+          if git diff --cached --quiet; then
+            echo "Universe unchanged."
+          else
+            git commit -m "Refresh NSE BSE stock universe"
+            git push
+          fi
