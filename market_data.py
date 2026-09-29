@@ -80,7 +80,7 @@ def build_row(d, meta, snapshot_date):
         "monthly_date": m.index[-1].date().isoformat(),
         "exchange": meta.get("EXCHANGE", ""),
         "symbol": meta.get("SYMBOL", ""),
-        "ticker": meta.get("YF_TICKER", ""),
+        "ticker": str(meta.name) if meta.name is not None else "",
         "name": meta.get("NAME", ""),
         "previous_close": float(d["Close"].iloc[-1]),
         "previous_sma20": float(d_sma20.iloc[-1]),
