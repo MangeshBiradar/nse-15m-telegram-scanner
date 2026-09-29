@@ -10,7 +10,7 @@ import yfinance as yf
 from indicators import supertrend, rsi, bb_upper, sma
 
 SNAPSHOT = "market_snapshot.csv"
-BATCH = 40
+BATCH = 25
 IST = ZoneInfo("Asia/Kolkata")
 
 COLUMNS = [
@@ -107,20 +107,50 @@ def refresh(snapshot=SNAPSHOT, symbols_path="symbols.csv"):
 
     for i in range(0, len(tickers), BATCH):
         batch = tickers[i:i+BATCH]
-        try:
-            data = yf.download(
-                batch,
-                period="2y",
-                interval="1d",
-                group_by="ticker",
-                auto_adjust=False,
-                progress=False,
-                threads=True,
-                timeout=30,
-            )
-        except Exception as e:
-            failed += len(batch)
-            print("historical batch failed:", e)
+        data = None
+        for attempt in range(3):
+            try:
+                data = yf.download(
+                    batch,
+                    period="2y",
+                    interval="1d",
+                    group_by="ticker",
+                    auto_adjust=False,
+                    progress=False,
+                    threads=False,
+                    timeout=45,
+                )
+                if data is not None and not data.empty:
+                    break
+            except Exception as e:
+                print(f"historical batch attempt {attempt + 1}/3 failed: {e}")
+            time.sleep(2 * (attempt + 1))
+
+        if data is None or data.empty:
+            print("Historical batch returned no data; retrying tickers individually.")
+            for ticker in batch:
+                try:
+                    one = yf.download(
+                        ticker,
+                        period="2y",
+                        interval="1d",
+                        auto_adjust=False,
+                        progress=False,
+                        threads=False,
+                        timeout=45,
+                    )
+                    if one is None or one.empty:
+                        failed += 1
+                        continue
+                    row = build_row(one, meta.loc[ticker], snapshot_date)
+                    if row:
+                        rows.append(row)
+                    else:
+                        failed += 1
+                except Exception as e:
+                    failed += 1
+                    print(ticker, "individual snapshot skip:", e)
+                time.sleep(0.15)
             continue
 
         for ticker in batch:
@@ -146,13 +176,18 @@ def refresh(snapshot=SNAPSHOT, symbols_path="symbols.csv"):
     new = pd.DataFrame(rows, columns=COLUMNS)
 
     # Never replace a good snapshot with a tiny/empty Yahoo result.
-    if len(new) < 100 and os.path.exists(snapshot):
+    if len(new) < 500 and os.path.exists(snapshot):
         old = pd.read_csv(snapshot)
         print(
             f"Snapshot refresh produced only {len(new)} rows; "
             f"keeping existing snapshot with {len(old)} rows."
         )
         return old
+
+    if len(new) < 500:
+        raise RuntimeError(
+            f"Market snapshot validation failed: only {len(new):,} valid rows were produced."
+        )
 
     new.to_csv(snapshot, index=False)
     print(
