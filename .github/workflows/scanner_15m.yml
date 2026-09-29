@@ -1,11 +1,13 @@
-name: NSE+BSE MSB Daily Pre-Market Scanner
+name: NSE+BSE MSB Intraday Scanner
 
 on:
   workflow_dispatch:
   schedule:
-    # 08:50 IST, Monday-Friday (25 minutes before NSE open)
-    - cron: "50 8 * * 1-5"
-      timezone: "Asia/Kolkata"
+    # NSE market: 09:15-15:30 IST, every 15 minutes.
+    # GitHub cron is UTC.
+    - cron: "45 3 * * 1-5"
+    - cron: "0,15,30,45 4-9 * * 1-5"
+    - cron: "0 10 * * 1-5"
 
 permissions:
   contents: write
@@ -29,7 +31,7 @@ jobs:
           python -m pip install --upgrade pip
           pip install -r requirements.txt
 
-      - name: Run MSB daily pre-market scanner
+      - name: Run MSB scanner
         env:
           TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
           TELEGRAM_CHAT_ID: ${{ secrets.TELEGRAM_CHAT_ID }}
@@ -45,6 +47,6 @@ jobs:
           if git diff --cached --quiet; then
             echo "No result/state changes to commit."
           else
-            git commit -m "Store daily MSB scan results"
+            git commit -m "Store intraday MSB scan results"
             git push
           fi
