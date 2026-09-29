@@ -5,6 +5,7 @@ on:
   push:
     paths:
       - "backtest_scanner.py"
+      - "backtest_diagnostic.py"
       - "indicators.py"
       - "symbols.csv"
 
@@ -26,6 +27,8 @@ jobs:
           pip install -r requirements.txt
       - name: Run 3-month comparison backtest
         run: python backtest_scanner.py
+      - name: Run 60-day diagnostic
+        run: python backtest_diagnostic.py
       - name: Upload backtest results
         uses: actions/upload-artifact@v4
         with:
