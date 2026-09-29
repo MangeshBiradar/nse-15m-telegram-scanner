@@ -247,10 +247,15 @@ def send_failure_alert(reason, scanned, total, duration):
 def main():
     started = time.monotonic()
 
-    # Safety: scheduled GitHub runs should only scan during Indian market hours.
+    # Scheduled runs are restricted to NSE market hours.
+    # Manual/workflow_dispatch runs are allowed at any time.
     now = datetime.now(IST)
-    if not (now.weekday() < 5 and pd.Timestamp("09:15").time() <= now.time() <= pd.Timestamp("15:35").time()):
-        print("Outside NSE market scan window:", now)
+    event = os.getenv("GITHUB_EVENT_NAME", "schedule")
+    if event == "schedule" and not (
+        now.weekday() < 5
+        and pd.Timestamp("09:15").time() <= now.time() <= pd.Timestamp("15:35").time()
+    ):
+        print("Scheduled run outside NSE market window:", now)
         return
 
     try:
