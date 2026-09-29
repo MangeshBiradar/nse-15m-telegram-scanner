@@ -1,28 +1,34 @@
-import os,json,time,math,requests,pandas as pd,yfinance as yf
+import os
+import json
+import time
+import math
+import requests
+import pandas as pd
+import yfinance as yf
 from datetime import datetime
 from zoneinfo import ZoneInfo
-from indicators import supertrend,rsi,bb_upper,sma
 
-STATE="state.json"
-RESULTS="scan_results.csv"
-BATCH=30
-IST=ZoneInfo("Asia/Kolkata")
+STATE = "state.json"
+RESULTS = "scan_results.csv"
+SNAPSHOT = "market_snapshot.csv"
+BATCH = 40
+IST = ZoneInfo("Asia/Kolkata")
 
 STRATEGY_LINES = [
     "• Weekly Close >= Weekly Supertrend(7,3)",
     "• Weekly RSI(14) > 60",
     "• Weekly Close >= Weekly Upper BB(20,2)",
     "• Previous Daily Close < Previous Daily SMA20",
-    "• Current Daily Close > Current Daily SMA20",
+    "• Current CMP > Current Daily SMA20",
 ]
 
 RESULT_COLUMNS = [
     "scan_date","scan_time_ist","run_type",
     "exchange","symbol","ticker","name",
     "signal_price","price_source",
-    "previous_close","previous_sma20","daily_sma20",
-    "weekly_close","weekly_rsi","weekly_supertrend","weekly_upper_bb",
-    "monthly_rsi","strategy"
+    "previous_date","previous_close","previous_sma20","daily_sma20",
+    "weekly_date","weekly_close","weekly_rsi","weekly_supertrend","weekly_upper_bb",
+    "monthly_date","monthly_rsi","strategy"
 ]
 
 def load():
@@ -53,79 +59,6 @@ def tg(msg):
         print("Telegram: FAILED:", e)
         return False
 
-def flatten(d):
-    if isinstance(d.columns, pd.MultiIndex):
-        d.columns = [x[0] if isinstance(x, tuple) else x for x in d.columns]
-    return d
-
-def clean(d):
-    if d is None or d.empty:
-        return None
-    d = flatten(d.copy())
-    needed = ["Open","High","Low","Close"]
-    if not all(x in d.columns for x in needed):
-        return None
-    d.index = pd.to_datetime(d.index)
-    if getattr(d.index, "tz", None) is not None:
-        d.index = d.index.tz_convert(IST).tz_localize(None)
-    return d.dropna(subset=needed).sort_index()
-
-def timeframe_ohlcv(d, rule):
-    x = d.resample(rule).agg({
-        "Open":"first","High":"max","Low":"min",
-        "Close":"last","Volume":"sum"
-    })
-    return x.dropna(subset=["Open","High","Low","Close"])
-
-def higher_timeframes(d):
-    return timeframe_ohlcv(d, "W-FRI"), timeframe_ohlcv(d, "ME")
-
-def daily_setup(d):
-    d = clean(d)
-    if d is None or len(d) < 120:
-        return None
-
-    w, m = higher_timeframes(d)
-    if len(w) < 60 or len(m) < 20:
-        return None
-
-    # Keep the current HTF candle, matching the live scanner's behavior.
-    w_st = supertrend(w, 7, 3)
-    w_rsi = rsi(w["Close"], 14)
-    w_bb = bb_upper(w["Close"], 20, 2)
-    m_rsi = rsi(m["Close"], 14)
-    d_sma = sma(d["Close"], 20)
-
-    vals = [
-        w["Close"].iloc[-1], w_st.iloc[-1], w_rsi.iloc[-1], w_bb.iloc[-1],
-        d["Close"].iloc[-2], d_sma.iloc[-2],
-        d["Close"].iloc[-1], d_sma.iloc[-1],
-    ]
-    if not all(math.isfinite(float(x)) for x in vals):
-        return None
-
-    if not (
-        vals[0] >= vals[1]
-        and vals[2] > 60
-        and vals[0] >= vals[3]
-        and vals[4] < vals[5]
-        and vals[6] > vals[7]
-    ):
-        return None
-
-    return {
-        "signal_date": d.index[-1].date().isoformat(),
-        "signal_price": float(d["Close"].iloc[-1]),
-        "previous_close": float(d["Close"].iloc[-2]),
-        "previous_sma20": float(d_sma.iloc[-2]),
-        "daily_sma20": float(d_sma.iloc[-1]),
-        "weekly_close": float(w["Close"].iloc[-1]),
-        "weekly_rsi": float(w_rsi.iloc[-1]),
-        "weekly_supertrend": float(w_st.iloc[-1]),
-        "weekly_upper_bb": float(w_bb.iloc[-1]),
-        "monthly_rsi": float(m_rsi.iloc[-1]) if math.isfinite(float(m_rsi.iloc[-1])) else None,
-    }
-
 def run_type():
     explicit = os.getenv("RUN_TYPE")
     if explicit:
@@ -137,15 +70,100 @@ def fmt_duration(seconds):
     seconds = int(round(seconds))
     return f"{seconds // 60}m {seconds % 60}s"
 
+def get_live_prices(tickers):
+    """Fetch only latest intraday CMP; no daily/weekly history is downloaded."""
+    prices = {}
+    failed = 0
+
+    for i in range(0, len(tickers), BATCH):
+        batch = tickers[i:i+BATCH]
+        try:
+            data = yf.download(
+                batch,
+                period="1d",
+                interval="1m",
+                group_by="ticker",
+                auto_adjust=False,
+                prepost=False,
+                progress=False,
+                threads=True,
+                timeout=20,
+            )
+        except Exception as e:
+            failed += len(batch)
+            print("CMP batch failed:", e)
+            continue
+
+        for ticker in batch:
+            try:
+                d = data if len(batch) == 1 else (
+                    data[ticker] if ticker in data.columns.get_level_values(0) else None
+                )
+                if d is None or d.empty or "Close" not in d.columns:
+                    failed += 1
+                    continue
+                close = pd.to_numeric(d["Close"], errors="coerce").dropna()
+                if close.empty:
+                    failed += 1
+                    continue
+                prices[ticker] = float(close.iloc[-1])
+            except Exception as e:
+                failed += 1
+                print(ticker, "CMP skip:", e)
+
+        time.sleep(0.15)
+
+    return prices, failed
+
+def live_setup(row, cmp):
+    required = [
+        "previous_close", "previous_sma20",
+        "weekly_close", "weekly_rsi", "weekly_supertrend", "weekly_upper_bb",
+    ]
+    if any(pd.isna(row.get(x)) for x in required) or not math.isfinite(float(cmp)):
+        return None
+
+    previous_close = float(row["previous_close"])
+    previous_sma20 = float(row["previous_sma20"])
+    weekly_close = float(row["weekly_close"])
+    weekly_rsi = float(row["weekly_rsi"])
+    weekly_supertrend = float(row["weekly_supertrend"])
+    weekly_upper_bb = float(row["weekly_upper_bb"])
+
+    # Reconstruct today's live SMA20 from yesterday's completed SMA20 and close.
+    current_sma20 = previous_sma20 + (float(cmp) - previous_close) / 20.0
+
+    if not (
+        weekly_close >= weekly_supertrend
+        and weekly_rsi > 60
+        and weekly_close >= weekly_upper_bb
+        and previous_close < previous_sma20
+        and float(cmp) > current_sma20
+    ):
+        return None
+
+    return {
+        "signal_date": datetime.now(IST).date().isoformat(),
+        "signal_price": float(cmp),
+        "previous_date": str(row.get("previous_date", "")),
+        "previous_close": previous_close,
+        "previous_sma20": previous_sma20,
+        "daily_sma20": current_sma20,
+        "weekly_date": str(row.get("weekly_date", "")),
+        "weekly_close": weekly_close,
+        "weekly_rsi": weekly_rsi,
+        "weekly_supertrend": weekly_supertrend,
+        "weekly_upper_bb": weekly_upper_bb,
+        "monthly_date": str(row.get("monthly_date", "")),
+        "monthly_rsi": float(row["monthly_rsi"]) if pd.notna(row.get("monthly_rsi")) else None,
+    }
+
 def save_scan_results(matches, universe, now):
     if not matches:
         print("No scan matches to record.")
         return 0
 
     meta = universe.copy()
-    if "YF_TICKER" not in meta.columns:
-        meta["YF_TICKER"] = ""
-
     meta["YF_TICKER"] = meta["YF_TICKER"].fillna("").astype(str).str.strip()
     meta = meta.drop_duplicates("YF_TICKER").set_index("YF_TICKER")
 
@@ -161,16 +179,19 @@ def save_scan_results(matches, universe, now):
             "ticker": ticker,
             "name": info.get("NAME", ""),
             "signal_price": setup["signal_price"],
-            "price_source": "Latest/current daily price at scan time",
+            "price_source": "Latest/current 1m CMP from yfinance",
+            "previous_date": setup["previous_date"],
             "previous_close": setup["previous_close"],
             "previous_sma20": setup["previous_sma20"],
             "daily_sma20": setup["daily_sma20"],
+            "weekly_date": setup["weekly_date"],
             "weekly_close": setup["weekly_close"],
             "weekly_rsi": setup["weekly_rsi"],
             "weekly_supertrend": setup["weekly_supertrend"],
             "weekly_upper_bb": setup["weekly_upper_bb"],
+            "monthly_date": setup["monthly_date"],
             "monthly_rsi": setup["monthly_rsi"],
-            "strategy": "MSB_BASE_V1",
+            "strategy": "MSB_BASE_V2_SNAPSHOT_CMP",
         })
 
     new = pd.DataFrame(rows, columns=RESULT_COLUMNS)
@@ -182,16 +203,13 @@ def save_scan_results(matches, universe, now):
 
     old = old.reindex(columns=RESULT_COLUMNS)
     combined = pd.concat([old, new], ignore_index=True)
-
-    # Prevent duplicate records if a manual run is repeated on the same signal date.
     combined = combined.drop_duplicates(
         subset=["scan_date","ticker","strategy"], keep="first"
     ).sort_values(["scan_date","ticker"]).reset_index(drop=True)
 
     combined.to_csv(RESULTS, index=False)
-    added = len(combined) - len(old.drop_duplicates(
-        subset=["scan_date","ticker","strategy"]
-    ))
+    old_unique = old.drop_duplicates(subset=["scan_date","ticker","strategy"])
+    added = len(combined) - len(old_unique)
     print(f"Stored {max(0, added)} new scan results in {RESULTS}; total rows={len(combined)}")
     return max(0, added)
 
@@ -215,7 +233,8 @@ def send_success_alert(scanned, matches, fresh, failed, duration):
         *STRATEGY_LINES,
         "",
         "💾 Results: scan_results.csv",
-        "💰 Signal price = latest/current daily price at scan time",
+        "📚 Weekly/previous-day indicators: market_snapshot.csv",
+        "💰 Signal price = latest/current 1m CMP at scan time",
         "",
         "🔄 Universe: NSE + BSE Equities",
         "🤖 Data: yfinance",
@@ -225,7 +244,7 @@ def send_success_alert(scanned, matches, fresh, failed, duration):
 def send_failure_alert(reason, scanned, total, duration):
     now = datetime.now(IST)
     return tg("\n".join([
-        "🔴 NSE+BSE MSB DAILY SCAN",
+        "🔴 NSE+BSE MSB INTRADAY SCAN",
         "",
         "🔴 Scan Status: FAILED",
         f"🕒 Time: {now.strftime('%d-%b-%Y %I:%M %p')} IST",
@@ -241,79 +260,57 @@ def main():
     now = datetime.now(IST)
     event = os.getenv("GITHUB_EVENT_NAME", "schedule")
 
-    # Scheduled scan is intended for the pre-market weekday slot.
-    # Do not reject a delayed GitHub Actions run: scheduled workflows can be delayed.
-    # The scan always uses the latest completed daily candle; there is no 15m condition.
     if event == "schedule" and now.weekday() >= 5:
         print("Scheduled scan on weekend:", now)
         return
 
     try:
         u = pd.read_csv("symbols.csv")
+        snap = pd.read_csv(SNAPSHOT)
     except Exception as e:
-        from universe import refresh
-        print("Universe file unavailable; attempting refresh:", e)
-        u = refresh("symbols.csv")
+        raise RuntimeError(
+            f"Required universe/snapshot file missing: {e}. "
+            "Run the daily universe refresh first."
+        )
 
-    if "YF_TICKER" not in u.columns:
-        from universe import refresh
-        u = refresh("symbols.csv")
+    if "YF_TICKER" not in u.columns or "ticker" not in snap.columns:
+        raise RuntimeError("symbols.csv or market_snapshot.csv has an invalid schema.")
 
+    # The 15-minute scanner uses frozen historical/HTF values from the morning
+    # snapshot and downloads only the latest CMP. It never downloads daily history.
     ts = (
-        u["YF_TICKER"].dropna().astype(str).str.strip()
+        snap["ticker"].dropna().astype(str).str.strip()
         .loc[lambda x: x.ne("") & x.ne("nan")]
         .unique().tolist()
     )
 
-    if not ts:
-        from universe import refresh
-        u = refresh("symbols.csv")
-        ts = (
-            u["YF_TICKER"].dropna().astype(str).str.strip()
-            .loc[lambda x: x.ne("") & x.ne("nan")]
-            .unique().tolist()
-        )
-
     total = len(ts)
-    print("Scanning", total, "eligible stocks")
+    print("Scanning", total, "snapshot-covered eligible stocks")
     if total == 0:
-        raise RuntimeError("Universe is empty after automatic refresh.")
+        raise RuntimeError("Market snapshot is empty.")
 
-    failed = 0
-    scanned = 0
+    prices, price_failed = get_live_prices(ts)
+
     matches = []
+    failed = price_failed
+    scanned = 0
 
-    for i in range(0, total, BATCH):
-        batch = ts[i:i+BATCH]
-        try:
-            data = yf.download(
-                batch, period="2y", interval="1d",
-                group_by="ticker", auto_adjust=False,
-                progress=False, threads=True,
-            )
-        except Exception as e:
-            failed += len(batch)
-            print("daily batch failed:", e)
+    snap = snap.drop_duplicates("ticker").set_index("ticker")
+    for ticker in ts:
+        scanned += 1
+        cmp = prices.get(ticker)
+        if cmp is None:
             continue
+        try:
+            setup = live_setup(snap.loc[ticker], cmp)
+            if setup:
+                matches.append((ticker, setup))
+        except Exception as e:
+            failed += 1
+            print(ticker, "signal skip:", e)
 
-        for t in batch:
-            scanned += 1
-            try:
-                d = data if len(batch) == 1 else (
-                    data[t] if t in data.columns.get_level_values(0) else None
-                )
-                setup = daily_setup(d)
-                if setup:
-                    matches.append((t, setup))
-            except Exception as e:
-                failed += 1
-                print(t, "daily skip", e)
-        time.sleep(0.25)
-
-    # Persist every signal with its entry/reference price and indicator values.
     stored = save_scan_results(matches, u, now)
 
-    # Keep one alert per ticker per signal date.
     state = load()
     fresh = []
     for ticker, setup in matches:
@@ -327,6 +324,7 @@ def main():
     print(
         "Universe:", total,
         "Scanned:", scanned,
+        "CMP available:", len(prices),
         "Matches:", len(matches),
         "New alerts:", len(fresh),
         "CSV records:", stored,
