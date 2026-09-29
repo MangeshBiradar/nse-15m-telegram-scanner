@@ -1,13 +1,11 @@
-name: NSE+BSE Scanner
+name: NSE+BSE MSB Realtime Scanner
 
 on:
   workflow_dispatch:
   schedule:
-    # 09:15 AM IST (03:45 UTC)
-    - cron: "47 3 * * 1-5"
-
-    # 03:00 PM IST (09:30 UTC)
-    - cron: "32 9 * * 1-5"
+    - cron: "45 3 * * 1-5"
+    - cron: "*/15 4-9 * * 1-5"
+    - cron: "0 10 * * 1-5"
 
 permissions:
   contents: write
@@ -31,7 +29,7 @@ jobs:
           python -m pip install --upgrade pip
           pip install -r requirements.txt
 
-      - name: Run scanner
+      - name: Run MSB realtime scanner
         env:
           TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
           TELEGRAM_CHAT_ID: ${{ secrets.TELEGRAM_CHAT_ID }}
@@ -42,12 +40,10 @@ jobs:
         run: |
           git config user.name "github-actions[bot]"
           git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
-
           git add state.json
-
           if git diff --cached --quiet; then
             echo "No state changes to commit."
           else
-            git commit -m "Update scanner state"
+            git commit -m "Update MSB realtime scanner state"
             git push
           fi
