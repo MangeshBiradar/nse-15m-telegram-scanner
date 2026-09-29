@@ -241,12 +241,12 @@ def main():
     now = datetime.now(IST)
     event = os.getenv("GITHUB_EVENT_NAME", "schedule")
 
-    # Scheduled scan is intentionally pre-market and once per weekday.
-    # It uses the latest completed daily candle; there is no 15m condition.
-    if event == "schedule":
-        if now.weekday() >= 5 or now.time() >= pd.Timestamp("09:15").time():
-            print("Scheduled scan is outside the intended pre-market window:", now)
-            return
+    # Scheduled scan is intended for the pre-market weekday slot.
+    # Do not reject a delayed GitHub Actions run: scheduled workflows can be delayed.
+    # The scan always uses the latest completed daily candle; there is no 15m condition.
+    if event == "schedule" and now.weekday() >= 5:
+        print("Scheduled scan on weekend:", now)
+        return
 
     try:
         u = pd.read_csv("symbols.csv")
