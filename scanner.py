@@ -4,6 +4,7 @@ from zoneinfo import ZoneInfo
 from indicators import supertrend,rsi,bb_upper,sma
 
 STATE="state.json"
+RESULTS="scan_results.csv"
 BATCH=30
 IST=ZoneInfo("Asia/Kolkata")
 
@@ -13,7 +14,15 @@ STRATEGY_LINES = [
     "• Weekly Close >= Weekly Upper BB(20,2)",
     "• Previous Daily Close < Previous Daily SMA20",
     "• Current Daily Close > Current Daily SMA20",
-    "• 15m Close > 15m SMA20",
+]
+
+RESULT_COLUMNS = [
+    "scan_date","scan_time_ist","run_type",
+    "exchange","symbol","ticker","name",
+    "signal_price","price_source",
+    "previous_close","previous_sma20","daily_sma20",
+    "weekly_close","weekly_rsi","weekly_supertrend","weekly_upper_bb",
+    "monthly_rsi","strategy"
 ]
 
 def load():
@@ -69,9 +78,7 @@ def timeframe_ohlcv(d, rule):
     return x.dropna(subset=["Open","High","Low","Close"])
 
 def higher_timeframes(d):
-    w = timeframe_ohlcv(d, "W-FRI")
-    m = timeframe_ohlcv(d, "ME")
-    return w, m
+    return timeframe_ohlcv(d, "W-FRI"), timeframe_ohlcv(d, "ME")
 
 def daily_setup(d):
     d = clean(d)
@@ -82,28 +89,21 @@ def daily_setup(d):
     if len(w) < 60 or len(m) < 20:
         return None
 
-    # IMPORTANT: keep the current weekly/monthly candle.
-    # Chartink's live scanner evaluates the current incomplete HTF candle.
+    # Keep the current HTF candle, matching the live scanner's behavior.
     w_st = supertrend(w, 7, 3)
     w_rsi = rsi(w["Close"], 14)
     w_bb = bb_upper(w["Close"], 20, 2)
     m_rsi = rsi(m["Close"], 14)
+    d_sma = sma(d["Close"], 20)
 
     vals = [
-        w["Close"].iloc[-1], w_st.iloc[-1], w_rsi.iloc[-1],
-        w_bb.iloc[-1],
-        d["Close"].iloc[-2], sma(d["Close"],20).iloc[-2],
-        d["Close"].iloc[-1], sma(d["Close"],20).iloc[-1],
+        w["Close"].iloc[-1], w_st.iloc[-1], w_rsi.iloc[-1], w_bb.iloc[-1],
+        d["Close"].iloc[-2], d_sma.iloc[-2],
+        d["Close"].iloc[-1], d_sma.iloc[-1],
     ]
     if not all(math.isfinite(float(x)) for x in vals):
         return None
 
-    # Exact MSB base logic:
-    # Weekly Close >= Weekly ST(7,3)
-    # Weekly RSI > 60
-    # Weekly Close >= Weekly Upper BB(20,2)
-    # Previous daily Close < Previous daily SMA20
-    # Current daily Close > Current daily SMA20
     if not (
         vals[0] >= vals[1]
         and vals[2] > 60
@@ -114,99 +114,118 @@ def daily_setup(d):
         return None
 
     return {
-        "week": str(w.index[-1].date()),
-        "month": str(m.index[-1].date()),
-        "close": float(d["Close"].iloc[-1]),
+        "signal_date": d.index[-1].date().isoformat(),
+        "signal_price": float(d["Close"].iloc[-1]),
+        "previous_close": float(d["Close"].iloc[-2]),
+        "previous_sma20": float(d_sma.iloc[-2]),
+        "daily_sma20": float(d_sma.iloc[-1]),
+        "weekly_close": float(w["Close"].iloc[-1]),
         "weekly_rsi": float(w_rsi.iloc[-1]),
-        "weekly_st": float(w_st.iloc[-1]),
-        "weekly_bb": float(w_bb.iloc[-1]),
-        "monthly_rsi": float(m_rsi.iloc[-1]),
-        "prev_close": float(d["Close"].iloc[-2]),
-        "prev_sma20": float(sma(d["Close"],20).iloc[-2]),
-        "daily_sma20": float(sma(d["Close"],20).iloc[-1]),
-    }
-
-def intraday_trigger(d15, base):
-    d15 = clean(d15)
-    if d15 is None or len(d15) < 60:
-        return None
-
-    sm = sma(d15["Close"], 20)
-
-    i = len(d15) - 1
-    vals = [d15["Close"].iloc[i], sm.iloc[i]]
-    if not all(math.isfinite(float(x)) for x in vals):
-        return None
-
-    ts = d15.index[i]
-
-    # Only the remaining 15m condition is Close > SMA20.
-    if not (vals[0] > vals[1]):
-        return None
-
-    return {
-        **base,
-        "bar_time": str(ts),
-        "intraday_close": float(d15["Close"].iloc[i]),
-        "intraday_open": float(d15["Open"].iloc[i]),
-        "intraday_sma20": float(sm.iloc[i]),
-        "trigger": "15M_SMA20_CONFIRMATION",
+        "weekly_supertrend": float(w_st.iloc[-1]),
+        "weekly_upper_bb": float(w_bb.iloc[-1]),
+        "monthly_rsi": float(m_rsi.iloc[-1]) if math.isfinite(float(m_rsi.iloc[-1])) else None,
     }
 
 def run_type():
     explicit = os.getenv("RUN_TYPE")
     if explicit:
         return explicit
-    event = os.getenv("GITHUB_EVENT_NAME", "scheduled")
+    event = os.getenv("GITHUB_EVENT_NAME", "schedule")
     return "Manual" if event == "workflow_dispatch" else "Scheduled"
 
 def fmt_duration(seconds):
     seconds = int(round(seconds))
     return f"{seconds // 60}m {seconds % 60}s"
 
-def send_success_alert(scanned, base_matches, condition_matches, fresh_signals, failed, duration, matches):
+def save_scan_results(matches, universe, now):
+    if not matches:
+        print("No scan matches to record.")
+        return 0
+
+    meta = universe.copy()
+    if "YF_TICKER" not in meta.columns:
+        meta["YF_TICKER"] = ""
+
+    meta["YF_TICKER"] = meta["YF_TICKER"].fillna("").astype(str).str.strip()
+    meta = meta.drop_duplicates("YF_TICKER").set_index("YF_TICKER")
+
+    rows = []
+    for ticker, setup in matches:
+        info = meta.loc[ticker] if ticker in meta.index else pd.Series(dtype=object)
+        rows.append({
+            "scan_date": setup["signal_date"],
+            "scan_time_ist": now.strftime("%Y-%m-%d %H:%M:%S"),
+            "run_type": run_type(),
+            "exchange": info.get("EXCHANGE", ""),
+            "symbol": info.get("SYMBOL", ""),
+            "ticker": ticker,
+            "name": info.get("NAME", ""),
+            "signal_price": setup["signal_price"],
+            "price_source": "Previous completed trading-day close",
+            "previous_close": setup["previous_close"],
+            "previous_sma20": setup["previous_sma20"],
+            "daily_sma20": setup["daily_sma20"],
+            "weekly_close": setup["weekly_close"],
+            "weekly_rsi": setup["weekly_rsi"],
+            "weekly_supertrend": setup["weekly_supertrend"],
+            "weekly_upper_bb": setup["weekly_upper_bb"],
+            "monthly_rsi": setup["monthly_rsi"],
+            "strategy": "MSB_BASE_V1",
+        })
+
+    new = pd.DataFrame(rows, columns=RESULT_COLUMNS)
+
+    if os.path.exists(RESULTS) and os.path.getsize(RESULTS) > 0:
+        old = pd.read_csv(RESULTS)
+    else:
+        old = pd.DataFrame(columns=RESULT_COLUMNS)
+
+    old = old.reindex(columns=RESULT_COLUMNS)
+    combined = pd.concat([old, new], ignore_index=True)
+
+    # Prevent duplicate records if a manual run is repeated on the same signal date.
+    combined = combined.drop_duplicates(
+        subset=["scan_date","ticker","strategy"], keep="first"
+    ).sort_values(["scan_date","ticker"]).reset_index(drop=True)
+
+    combined.to_csv(RESULTS, index=False)
+    added = len(combined) - len(old.drop_duplicates(
+        subset=["scan_date","ticker","strategy"]
+    ))
+    print(f"Stored {max(0, added)} new scan results in {RESULTS}; total rows={len(combined)}")
+    return max(0, added)
+
+def send_success_alert(scanned, matches, fresh, failed, duration):
     now = datetime.now(IST)
     status = "SUCCESS" if failed == 0 else "PARTIAL"
     lines = [
-        "📊 NSE+BSE MSB SWING SCAN",
+        "📊 NSE+BSE MSB DAILY SCAN",
         "",
         f"🟢 Status: {status}" if failed == 0 else f"🟡 Status: {status}",
         f"🕒 Time: {now.strftime('%d-%b-%Y %I:%M %p')} IST",
         f"📡 Run: {run_type()}",
         "",
         f"📈 Stocks scanned: {scanned:,}",
-        f"🧩 MSB base matches: {base_matches:,}",
-        f"🎯 15m condition matches: {condition_matches:,}",
-        f"🆕 New alerts: {fresh_signals:,}",
+        f"🎯 MSB matches: {matches:,}",
+        f"🆕 New CSV records: {fresh:,}",
         f"⚠️ Failed/skipped: {failed:,}",
         f"⏱️ Duration: {fmt_duration(duration)}",
         "",
         "Strategy:",
         *STRATEGY_LINES,
         "",
+        "💾 Results: scan_results.csv",
+        "💰 Signal price = previous completed trading-day close",
+        "",
         "🔄 Universe: NSE + BSE Equities",
         "🤖 Data: yfinance",
     ]
-
-    if matches:
-        lines.extend(["", "📌 MATCH DETAILS"])
-        for i, s in enumerate(matches, 1):
-            lines.extend([
-                "",
-                f"{i}. {s['ticker']}",
-                f"   Trigger: {s['trigger']} @ {s['bar_time']}",
-                f"   Price: {s['intraday_close']:.2f}",
-                f"   15m SMA20: {s['intraday_sma20']:.2f}",
-                f"   Weekly RSI: {s['weekly_rsi']:.2f}",
-                f"   Monthly RSI: {s['monthly_rsi']:.2f}",
-                f"   Weekly BB: {s['weekly_bb']:.2f}",
-            ])
     return tg("\n".join(lines))
 
 def send_failure_alert(reason, scanned, total, duration):
     now = datetime.now(IST)
     return tg("\n".join([
-        "🔴 NSE+BSE MSB SWING SCAN",
+        "🔴 NSE+BSE MSB DAILY SCAN",
         "",
         "🔴 Scan Status: FAILED",
         f"🕒 Time: {now.strftime('%d-%b-%Y %I:%M %p')} IST",
@@ -215,23 +234,19 @@ def send_failure_alert(reason, scanned, total, duration):
         f"Reason: {reason}",
         f"Stocks scanned: {scanned:,} / {total:,}",
         f"⏱️ Duration: {fmt_duration(duration)}",
-        "",
-        "🤖 Data: yfinance",
     ]))
 
 def main():
     started = time.monotonic()
-
-    # Scheduled runs are restricted to NSE market hours.
-    # Manual/workflow_dispatch runs are allowed at any time.
     now = datetime.now(IST)
     event = os.getenv("GITHUB_EVENT_NAME", "schedule")
-    if event == "schedule" and not (
-        now.weekday() < 5
-        and pd.Timestamp("09:15").time() <= now.time() <= pd.Timestamp("15:35").time()
-    ):
-        print("Scheduled run outside NSE market window:", now)
-        return
+
+    # Scheduled scan is intentionally pre-market and once per weekday.
+    # It uses the latest completed daily candle; there is no 15m condition.
+    if event == "schedule":
+        if now.weekday() >= 5 or now.time() >= pd.Timestamp("09:15").time():
+            print("Scheduled scan is outside the intended pre-market window:", now)
+            return
 
     try:
         u = pd.read_csv("symbols.csv")
@@ -244,15 +259,21 @@ def main():
         from universe import refresh
         u = refresh("symbols.csv")
 
-    ts = (u["YF_TICKER"].dropna().astype(str).str.strip()
-          .loc[lambda x: x.ne("") & x.ne("nan")].unique().tolist())
+    ts = (
+        u["YF_TICKER"].dropna().astype(str).str.strip()
+        .loc[lambda x: x.ne("") & x.ne("nan")]
+        .unique().tolist()
+    )
+
     if not ts:
         from universe import refresh
         u = refresh("symbols.csv")
-        ts = (u["YF_TICKER"].dropna().astype(str).str.strip()
-              .loc[lambda x: x.ne("") & x.ne("nan")].unique().tolist())
+        ts = (
+            u["YF_TICKER"].dropna().astype(str).str.strip()
+            .loc[lambda x: x.ne("") & x.ne("nan")]
+            .unique().tolist()
+        )
 
-    state = load()
     total = len(ts)
     print("Scanning", total, "eligible stocks")
     if total == 0:
@@ -260,11 +281,8 @@ def main():
 
     failed = 0
     scanned = 0
-    base_matches = []
-    condition_matches = []
-    fresh_signals = []
+    matches = []
 
-    # Stage 1: daily + weekly MSB filter (monthly RSI is informational only).
     for i in range(0, total, BATCH):
         batch = ts[i:i+BATCH]
         try:
@@ -284,69 +302,38 @@ def main():
                 d = data if len(batch) == 1 else (
                     data[t] if t in data.columns.get_level_values(0) else None
                 )
-                base = daily_setup(d)
-                if base:
-                    base_matches.append((t, base))
+                setup = daily_setup(d)
+                if setup:
+                    matches.append((t, setup))
             except Exception as e:
                 failed += 1
                 print(t, "daily skip", e)
         time.sleep(0.25)
 
-    # Stage 2: only fetch expensive 15m data for MSB base matches.
-    candidates = len(base_matches)
-    print("MSB base candidates:", candidates)
+    # Persist every signal with its entry/reference price and indicator values.
+    stored = save_scan_results(matches, u, now)
 
-    for i in range(0, candidates, BATCH):
-        batch = [x[0] for x in base_matches[i:i+BATCH]]
-        bases = dict(base_matches[i:i+BATCH])
-        try:
-            data = yf.download(
-                batch, period="60d", interval="15m",
-                group_by="ticker", auto_adjust=False,
-                progress=False, threads=True,
-            )
-        except Exception as e:
-            failed += len(batch)
-            print("15m batch failed:", e)
-            continue
-
-        for t in batch:
-            try:
-                d15 = data if len(batch) == 1 else (
-                    data[t] if t in data.columns.get_level_values(0) else None
-                )
-                s = intraday_trigger(d15, bases[t])
-                if not s:
-                    continue
-                s["ticker"] = t
-                condition_matches.append(s)
-
-                # One new Telegram alert per ticker per trading day.
-                key = t + "|" + now.strftime("%Y-%m-%d")
-                if not state.get(key):
-                    state[key] = True
-                    fresh_signals.append(s)
-            except Exception as e:
-                failed += 1
-                print(t, "15m skip", e)
-        time.sleep(0.25)
-
+    # Keep one alert per ticker per signal date.
+    state = load()
+    fresh = []
+    for ticker, setup in matches:
+        key = f"{ticker}|{setup['signal_date']}"
+        if not state.get(key):
+            state[key] = True
+            fresh.append((ticker, setup))
     save(state)
-    duration = time.monotonic() - started
 
+    duration = time.monotonic() - started
     print(
         "Universe:", total,
         "Scanned:", scanned,
-        "MSB base:", len(base_matches),
-        "15m matches:", len(condition_matches),
-        "Fresh:", len(fresh_signals),
+        "Matches:", len(matches),
+        "New alerts:", len(fresh),
+        "CSV records:", stored,
         "Failed:", failed,
     )
 
-    send_success_alert(
-        scanned, len(base_matches), len(condition_matches),
-        len(fresh_signals), failed, duration, fresh_signals
-    )
+    send_success_alert(scanned, len(matches), stored, failed, duration)
 
 if __name__ == "__main__":
     try:
