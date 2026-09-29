@@ -161,7 +161,7 @@ def save_scan_results(matches, universe, now):
             "ticker": ticker,
             "name": info.get("NAME", ""),
             "signal_price": setup["signal_price"],
-            "price_source": "Previous completed trading-day close",
+            "price_source": "Latest/current daily price at scan time",
             "previous_close": setup["previous_close"],
             "previous_sma20": setup["previous_sma20"],
             "daily_sma20": setup["daily_sma20"],
@@ -199,7 +199,7 @@ def send_success_alert(scanned, matches, fresh, failed, duration):
     now = datetime.now(IST)
     status = "SUCCESS" if failed == 0 else "PARTIAL"
     lines = [
-        "📊 NSE+BSE MSB DAILY SCAN",
+        "📊 NSE+BSE MSB INTRADAY SCAN",
         "",
         f"🟢 Status: {status}" if failed == 0 else f"🟡 Status: {status}",
         f"🕒 Time: {now.strftime('%d-%b-%Y %I:%M %p')} IST",
@@ -215,7 +215,7 @@ def send_success_alert(scanned, matches, fresh, failed, duration):
         *STRATEGY_LINES,
         "",
         "💾 Results: scan_results.csv",
-        "💰 Signal price = previous completed trading-day close",
+        "💰 Signal price = latest/current daily price at scan time",
         "",
         "🔄 Universe: NSE + BSE Equities",
         "🤖 Data: yfinance",
