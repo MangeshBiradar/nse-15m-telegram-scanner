@@ -36,6 +36,16 @@ jobs:
         run: |
           python market_data.py
 
+      - name: Validate market snapshot
+        run: |
+          python - <<'PY'
+          import pandas as pd
+          df = pd.read_csv("market_snapshot.csv")
+          if len(df) < 500:
+              raise SystemExit(f"Snapshot validation failed: {len(df)} rows")
+          print(f"Snapshot OK: {len(df)} stocks")
+          PY
+
       - name: Commit refreshed universe and market snapshot
         run: |
           git config user.name "github-actions[bot]"
