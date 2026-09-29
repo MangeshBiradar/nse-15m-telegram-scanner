@@ -1,11 +1,11 @@
-name: NSE+BSE MSB Realtime Scanner
+name: NSE+BSE MSB Daily Pre-Market Scanner
 
 on:
   workflow_dispatch:
   schedule:
-    - cron: "45 3 * * 1-5"
-    - cron: "*/15 4-9 * * 1-5"
-    - cron: "0 10 * * 1-5"
+    # 08:50 IST, Monday-Friday (25 minutes before NSE open)
+    - cron: "50 8 * * 1-5"
+      timezone: "Asia/Kolkata"
 
 permissions:
   contents: write
@@ -29,21 +29,22 @@ jobs:
           python -m pip install --upgrade pip
           pip install -r requirements.txt
 
-      - name: Run MSB realtime scanner
+      - name: Run MSB daily pre-market scanner
         env:
           TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
           TELEGRAM_CHAT_ID: ${{ secrets.TELEGRAM_CHAT_ID }}
+          RUN_TYPE: Scheduled
         run: |
           python scanner.py
 
-      - name: Commit updated state
+      - name: Commit scan results and state
         run: |
           git config user.name "github-actions[bot]"
           git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
-          git add state.json
+          git add scan_results.csv state.json
           if git diff --cached --quiet; then
-            echo "No state changes to commit."
+            echo "No result/state changes to commit."
           else
-            git commit -m "Update MSB realtime scanner state"
+            git commit -m "Store daily MSB scan results"
             git push
           fi
