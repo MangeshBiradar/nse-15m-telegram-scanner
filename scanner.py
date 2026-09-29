@@ -10,14 +10,10 @@ IST=ZoneInfo("Asia/Kolkata")
 STRATEGY_LINES = [
     "• Weekly Close >= Weekly Supertrend(7,3)",
     "• Weekly RSI(14) > 60",
-    "• Monthly RSI(14) > 60",
     "• Weekly Close >= Weekly Upper BB(20,2)",
     "• Previous Daily Close < Previous Daily SMA20",
     "• Current Daily Close > Current Daily SMA20",
     "• 15m Close > 15m SMA20",
-    "• 15m Close > 15m Supertrend(7,3)",
-    "• 15m RSI(14) > 55",
-    "• 15m momentum: Close > previous 15m High",
 ]
 
 def load():
@@ -95,7 +91,7 @@ def daily_setup(d):
 
     vals = [
         w["Close"].iloc[-1], w_st.iloc[-1], w_rsi.iloc[-1],
-        w_bb.iloc[-1], m_rsi.iloc[-1],
+        w_bb.iloc[-1],
         d["Close"].iloc[-2], sma(d["Close"],20).iloc[-2],
         d["Close"].iloc[-1], sma(d["Close"],20).iloc[-1],
     ]
@@ -105,17 +101,15 @@ def daily_setup(d):
     # Exact MSB base logic:
     # Weekly Close >= Weekly ST(7,3)
     # Weekly RSI > 60
-    # Monthly RSI > 60
     # Weekly Close >= Weekly Upper BB(20,2)
     # Previous daily Close < Previous daily SMA20
     # Current daily Close > Current daily SMA20
     if not (
         vals[0] >= vals[1]
         and vals[2] > 60
-        and vals[4] > 60
         and vals[0] >= vals[3]
-        and vals[5] < vals[6]
-        and vals[7] > vals[8]
+        and vals[4] < vals[5]
+        and vals[6] > vals[7]
     ):
         return None
 
@@ -137,32 +131,17 @@ def intraday_trigger(d15, base):
     if d15 is None or len(d15) < 60:
         return None
 
-    st = supertrend(d15, 7, 3)
-    rr = rsi(d15["Close"], 14)
     sm = sma(d15["Close"], 20)
 
     i = len(d15) - 1
-    vals = [d15["Close"].iloc[i], d15["Open"].iloc[i], st.iloc[i], rr.iloc[i], sm.iloc[i]]
+    vals = [d15["Close"].iloc[i], sm.iloc[i]]
     if not all(math.isfinite(float(x)) for x in vals):
         return None
 
-    # For the first 15m bar of the day there is no same-day previous 15m bar.
-    # Use bullish/opening confirmation. From the second bar onward require
-    # close > previous 15m high for the momentum trigger.
     ts = d15.index[i]
-    first_bar = ts.time() <= pd.Timestamp("09:29:59").time()
 
-    common = (
-        vals[0] > vals[2]
-        and vals[0] > vals[4]
-        and vals[3] > 55
-    )
-    if first_bar:
-        momentum = vals[0] > vals[1]
-    else:
-        momentum = vals[0] > float(d15["High"].iloc[i-1])
-
-    if not (common and momentum):
+    # Only the remaining 15m condition is Close > SMA20.
+    if not (vals[0] > vals[1]):
         return None
 
     return {
@@ -170,10 +149,8 @@ def intraday_trigger(d15, base):
         "bar_time": str(ts),
         "intraday_close": float(d15["Close"].iloc[i]),
         "intraday_open": float(d15["Open"].iloc[i]),
-        "intraday_st": float(st.iloc[i]),
-        "intraday_rsi": float(rr.iloc[i]),
         "intraday_sma20": float(sm.iloc[i]),
-        "trigger": "OPENING_BULLISH" if first_bar else "15M_BREAKOUT",
+        "trigger": "15M_SMA20_CONFIRMATION",
     }
 
 def run_type():
@@ -219,9 +196,7 @@ def send_success_alert(scanned, base_matches, condition_matches, fresh_signals, 
                 f"{i}. {s['ticker']}",
                 f"   Trigger: {s['trigger']} @ {s['bar_time']}",
                 f"   Price: {s['intraday_close']:.2f}",
-                f"   15m RSI: {s['intraday_rsi']:.2f}",
                 f"   15m SMA20: {s['intraday_sma20']:.2f}",
-                f"   15m Supertrend: {s['intraday_st']:.2f}",
                 f"   Weekly RSI: {s['weekly_rsi']:.2f}",
                 f"   Monthly RSI: {s['monthly_rsi']:.2f}",
                 f"   Weekly BB: {s['weekly_bb']:.2f}",
@@ -289,7 +264,7 @@ def main():
     condition_matches = []
     fresh_signals = []
 
-    # Stage 1: daily + weekly + monthly MSB filter.
+    # Stage 1: daily + weekly MSB filter (monthly RSI is informational only).
     for i in range(0, total, BATCH):
         batch = ts[i:i+BATCH]
         try:
