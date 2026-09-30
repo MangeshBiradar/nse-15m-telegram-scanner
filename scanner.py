@@ -21,6 +21,7 @@ STRATEGY_LINES = [
     "• Weekly RSI(14) > 60",
     "• Weekly Close >= Weekly Upper BB(20,2)",
     "• Previous Daily Close < Previous Daily SMA20",
+    "• 15-minute Close > 15-minute Open",
 ]
 
 RESULT_COLUMNS = [
@@ -165,6 +166,7 @@ def get_live_bars(tickers):
                     "close": float(x["Close"].iloc[-1]),
                     "last_bar_time": x.index[-1].strftime("%Y-%m-%d %H:%M:%S"),
                     "15m_time": completed.index[-1].strftime("%Y-%m-%d %H:%M:%S"),
+                    "15m_open": float(p["Open"]),
                     "15m_close": close15,
                     "15m_rsi": rsi15,
                     "15m_supertrend": st15,
@@ -296,6 +298,7 @@ def asof_setup(row, bar):
         and weekly_rsi > 60
         and weekly_close >= weekly_bb
         and previous_close < previous_sma20
+        and float(bar["15m_close"]) > float(bar["15m_open"])
     ):
         return None
 
