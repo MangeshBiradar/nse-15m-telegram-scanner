@@ -410,7 +410,7 @@ def save_run_history(now, scanned, live_bars, matches, fresh, failed, stored, du
 def send_data_pull_alert(total, live_bars, failed, duration):
     now = datetime.now(IST)
     status = "SUCCESS" if failed == 0 else "PARTIAL"
-    return tg("\\n".join([
+    return tg("\n".join([
         "📡 NSE+BSE MARKET DATA PULL",
         "",
         f"🟢 Status: {status}" if failed == 0 else f"🟡 Status: {status}",
@@ -429,7 +429,7 @@ def send_data_pull_alert(total, live_bars, failed, duration):
 def send_success_alert(scanned, matches, fresh, failed, duration):
     now = datetime.now(IST)
     status = "SUCCESS" if failed == 0 else "PARTIAL"
-    return tg("\\n".join([
+    return tg("\n".join([
         "📊 NSE+BSE MSB NON-REPAINT INTRADAY SCAN","",
         f"🟢 Status: {status}" if failed == 0 else f"🟡 Status: {status}",
         f"🕒 Time: {now.strftime('%d-%b-%Y %I:%M %p')} IST",
@@ -451,7 +451,7 @@ def send_success_alert(scanned, matches, fresh, failed, duration):
 
 def send_failure_alert(reason, scanned, total, duration):
     now = datetime.now(IST)
-    return tg("\\n".join([
+    return tg("\n".join([
         "🔴 NSE+BSE MSB NON-REPAINT INTRADAY SCAN","",
         "🔴 Scan Status: FAILED",
         f"🕒 Time: {now.strftime('%d-%b-%Y %I:%M %p')} IST",
