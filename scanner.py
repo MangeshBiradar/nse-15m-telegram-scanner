@@ -20,12 +20,7 @@ STRATEGY_LINES = [
     "• Weekly Close >= Weekly Supertrend(7,3)",
     "• Weekly RSI(14) > 60",
     "• Weekly Close >= Weekly Upper BB(20,2)",
-    "• Monthly RSI(14) > 60",
     "• Previous Daily Close < Previous Daily SMA20",
-    "• Current Daily Close > Current Daily SMA20",
-    "• 15-minute Close > 15-minute Supertrend(7,3)",
-    "• 15-minute RSI(14) > 55",
-    "• 15-minute Close > Previous 15-minute High",
 ]
 
 RESULT_COLUMNS = [
@@ -300,12 +295,7 @@ def asof_setup(row, bar):
         weekly_close >= weekly_st
         and weekly_rsi > 60
         and weekly_close >= weekly_bb
-        and monthly_rsi > 60
         and previous_close < previous_sma20
-        and current_close > current_sma20
-        and float(bar["15m_close"]) > float(bar["15m_supertrend"])
-        and float(bar["15m_rsi"]) > 55
-        and float(bar["15m_close"]) > float(bar["previous_15m_high"])
     ):
         return None
 
