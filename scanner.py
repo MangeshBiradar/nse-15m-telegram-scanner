@@ -151,17 +151,18 @@ def decode_history(value):
         return pd.DataFrame()
 
 def append_current_bar(history, bar):
-    d = history.copy()
-    idx = pd.Timestamp(bar["date"])
-    current = pd.DataFrame([{
-        "Open": bar["open"], "High": bar["high"],
-        "Low": bar["low"], "Close": bar["close"],
-    }], index=[idx])
-    if idx in d.index:
-        d.loc[idx, ["Open","High","Low","Close"]] = current.iloc[0]
-    else:
-        d = pd.concat([d, current])
-    return d.sort_index()
+    """Update the current weekly/monthly candle with today's live bar.
+    Snapshot history is already resampled; do not append today's bar as a
+    separate higher-timeframe candle because that would distort indicators.
+    """
+    d = history.copy().sort_index()
+    if d.empty:
+        return d
+    idx = d.index[-1]
+    d.loc[idx, "High"] = max(float(d.loc[idx, "High"]), float(bar["high"]))
+    d.loc[idx, "Low"] = min(float(d.loc[idx, "Low"]), float(bar["low"]))
+    d.loc[idx, "Close"] = float(bar["close"])
+    return d
 
 def rma(s, n):
     s = pd.Series(s, dtype="float64")
