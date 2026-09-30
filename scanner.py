@@ -311,10 +311,10 @@ def save_scan_results(matches, universe, now):
     old = pd.read_csv(RESULTS) if os.path.exists(RESULTS) and os.path.getsize(RESULTS) > 0 else pd.DataFrame(columns=RESULT_COLUMNS)
     old = old.reindex(columns=RESULT_COLUMNS)
     combined = pd.concat([old, new], ignore_index=True)
-    combined = combined.drop_duplicates(subset=["scan_date","ticker","strategy"], keep="first")
+    combined = combined.drop_duplicates(subset=["scan_date","scan_time_ist","ticker","strategy"], keep="first")
     combined = combined.sort_values(["scan_date","ticker"]).reset_index(drop=True)
     combined.to_csv(RESULTS, index=False)
-    old_unique = old.drop_duplicates(subset=["scan_date","ticker","strategy"])
+    old_unique = old.drop_duplicates(subset=["scan_date","scan_time_ist","ticker","strategy"])
     added = max(0, len(combined) - len(old_unique))
     print(f"Stored {added} new scan results in {RESULTS}; total rows={len(combined)}")
     return added
