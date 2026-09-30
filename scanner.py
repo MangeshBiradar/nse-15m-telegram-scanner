@@ -13,13 +13,16 @@ RESULTS = "scan_results.csv"
 SNAPSHOT = "market_snapshot.csv"
 BATCH = 40
 IST = ZoneInfo("Asia/Kolkata")
+STRATEGY = "MSB_BASE_V3_ASOF_NON_REPAINT"
 
 STRATEGY_LINES = [
     "• Weekly Close >= Weekly Supertrend(7,3)",
     "• Weekly RSI(14) > 60",
     "• Weekly Close >= Weekly Upper BB(20,2)",
+    "• Monthly RSI(14) > 60",
     "• Previous Daily Close < Previous Daily SMA20",
-    "• Current CMP > Current Daily SMA20",
+    "• Current Daily Close > Current Daily SMA20",
+    "• 15-minute condition: DISABLED",
 ]
 
 RESULT_COLUMNS = [
@@ -63,35 +66,43 @@ def run_type():
     explicit = os.getenv("RUN_TYPE")
     if explicit:
         return explicit
-    event = os.getenv("GITHUB_EVENT_NAME", "schedule")
-    return "Manual" if event == "workflow_dispatch" else "Scheduled"
+    return "Manual" if os.getenv("GITHUB_EVENT_NAME", "schedule") == "workflow_dispatch" else "Scheduled"
 
 def fmt_duration(seconds):
     seconds = int(round(seconds))
     return f"{seconds // 60}m {seconds % 60}s"
 
-def get_live_prices(tickers):
-    """Fetch only latest intraday CMP; no daily/weekly history is downloaded."""
-    prices = {}
-    failed = 0
+def clean_intraday(d):
+    if d is None or d.empty:
+        return None
+    d = d.copy()
+    if isinstance(d.columns, pd.MultiIndex):
+        d.columns = [x[0] if isinstance(x, tuple) else x for x in d.columns]
+    if "Close" not in d.columns:
+        return None
+    d.index = pd.to_datetime(d.index)
+    if getattr(d.index, "tz", None) is not None:
+        d.index = d.index.tz_convert(IST).tz_localize(None)
+    return d.sort_index().dropna(subset=["Close"])
 
+def get_live_bars(tickers):
+    """Return the latest intraday OHLC bar for each ticker.
+    This is the only live data needed: it supplies the current day's partial
+    OHLC and CMP, which is then merged into frozen completed HTF history.
+    """
+    bars = {}
+    failed = 0
     for i in range(0, len(tickers), BATCH):
         batch = tickers[i:i+BATCH]
         try:
             data = yf.download(
-                batch,
-                period="1d",
-                interval="1m",
-                group_by="ticker",
-                auto_adjust=False,
-                prepost=False,
-                progress=False,
-                threads=True,
-                timeout=20,
+                batch, period="1d", interval="1m",
+                group_by="ticker", auto_adjust=False, prepost=False,
+                progress=False, threads=True, timeout=20,
             )
         except Exception as e:
             failed += len(batch)
-            print("CMP batch failed:", e)
+            print("Intraday batch failed:", e)
             continue
 
         for ticker in batch:
@@ -99,63 +110,164 @@ def get_live_prices(tickers):
                 d = data if len(batch) == 1 else (
                     data[ticker] if ticker in data.columns.get_level_values(0) else None
                 )
-                if d is None or d.empty or "Close" not in d.columns:
+                d = clean_intraday(d)
+                if d is None or d.empty:
                     failed += 1
                     continue
-                close = pd.to_numeric(d["Close"], errors="coerce").dropna()
-                if close.empty:
+                latest_day = d.index[-1].date()
+                x = d[d.index.date == latest_day]
+                if x.empty:
                     failed += 1
                     continue
-                prices[ticker] = float(close.iloc[-1])
+                bars[ticker] = {
+                    "date": latest_day.isoformat(),
+                    "open": float(x["Open"].iloc[0]) if "Open" in x.columns else float(x["Close"].iloc[0]),
+                    "high": float(x["High"].max()) if "High" in x.columns else float(x["Close"].max()),
+                    "low": float(x["Low"].min()) if "Low" in x.columns else float(x["Close"].min()),
+                    "close": float(x["Close"].iloc[-1]),
+                    "last_bar_time": x.index[-1].strftime("%Y-%m-%d %H:%M:%S"),
+                }
             except Exception as e:
                 failed += 1
-                print(ticker, "CMP skip:", e)
-
+                print(ticker, "intraday skip:", e)
         time.sleep(0.15)
+    return bars, failed
 
-    return prices, failed
+def decode_history(value):
+    if value is None or (isinstance(value, float) and pd.isna(value)):
+        return pd.DataFrame()
+    try:
+        rows = json.loads(str(value))
+        d = pd.DataFrame(rows)
+        if d.empty:
+            return d
+        d["date"] = pd.to_datetime(d["date"])
+        d = d.set_index("date").sort_index()
+        for c in ["Open","High","Low","Close"]:
+            d[c] = pd.to_numeric(d[c], errors="coerce")
+        return d.dropna(subset=["Open","High","Low","Close"])
+    except Exception:
+        return pd.DataFrame()
 
-def live_setup(row, cmp):
-    required = [
-        "previous_close", "previous_sma20",
-        "weekly_close", "weekly_rsi", "weekly_supertrend", "weekly_upper_bb",
-    ]
-    if any(pd.isna(row.get(x)) for x in required) or not math.isfinite(float(cmp)):
+def append_current_bar(history, bar):
+    d = history.copy()
+    idx = pd.Timestamp(bar["date"])
+    current = pd.DataFrame([{
+        "Open": bar["open"], "High": bar["high"],
+        "Low": bar["low"], "Close": bar["close"],
+    }], index=[idx])
+    if idx in d.index:
+        d.loc[idx, ["Open","High","Low","Close"]] = current.iloc[0]
+    else:
+        d = pd.concat([d, current])
+    return d.sort_index()
+
+def rma(s, n):
+    s = pd.Series(s, dtype="float64")
+    out = pd.Series(float("nan"), index=s.index)
+    if len(s) < n:
+        return out
+    out.iloc[n-1] = s.iloc[:n].mean()
+    a = 1.0 / n
+    for i in range(n, len(s)):
+        out.iloc[i] = out.iloc[i-1] + a * (s.iloc[i] - out.iloc[i-1])
+    return out
+
+def atr(df, n=10):
+    pc = df["Close"].shift(1)
+    tr = pd.concat([
+        df["High"] - df["Low"],
+        (df["High"] - pc).abs(),
+        (df["Low"] - pc).abs()
+    ], axis=1).max(axis=1)
+    return rma(tr, n)
+
+def supertrend(df, n=10, m=3):
+    a = atr(df, n)
+    mid = (df["High"] + df["Low"]) / 2
+    bu, bl = mid + m*a, mid - m*a
+    fu = pd.Series(float("nan"), index=df.index)
+    fl = pd.Series(float("nan"), index=df.index)
+    st = pd.Series(float("nan"), index=df.index)
+    for i in range(len(df)):
+        if pd.isna(a.iloc[i]):
+            continue
+        if i == 0 or pd.isna(fu.iloc[i-1]):
+            fu.iloc[i], fl.iloc[i], st.iloc[i] = bu.iloc[i], bl.iloc[i], bu.iloc[i]
+            continue
+        pc = df["Close"].iloc[i-1]
+        fu.iloc[i] = bu.iloc[i] if bu.iloc[i] < fu.iloc[i-1] or pc > fu.iloc[i-1] else fu.iloc[i-1]
+        fl.iloc[i] = bl.iloc[i] if bl.iloc[i] > fl.iloc[i-1] or pc < fl.iloc[i-1] else fl.iloc[i-1]
+        st.iloc[i] = (
+            fl.iloc[i] if st.iloc[i-1] == fu.iloc[i-1] and df["Close"].iloc[i] > fu.iloc[i]
+            else fu.iloc[i] if st.iloc[i-1] == fu.iloc[i-1]
+            else fu.iloc[i] if df["Close"].iloc[i] < fl.iloc[i]
+            else fl.iloc[i]
+        )
+    return st
+
+def rsi(s, n=14):
+    d = pd.Series(s, dtype="float64").diff()
+    g, l = d.clip(lower=0), -d.clip(upper=0)
+    ag, al = rma(g, n), rma(l, n)
+    rs = ag / al.replace(0, float("nan"))
+    x = 100 - 100 / (1 + rs)
+    return x.where(~((al == 0) & (ag > 0)), 100)
+
+def bb_upper(s, n=20, m=2):
+    s = pd.Series(s, dtype="float64")
+    return s.rolling(n).mean() + m*s.rolling(n).std(ddof=0)
+
+def asof_setup(row, bar):
+    if not bar or not math.isfinite(float(bar["close"])):
         return None
 
     previous_close = float(row["previous_close"])
     previous_sma20 = float(row["previous_sma20"])
-    weekly_close = float(row["weekly_close"])
-    weekly_rsi = float(row["weekly_rsi"])
-    weekly_supertrend = float(row["weekly_supertrend"])
-    weekly_upper_bb = float(row["weekly_upper_bb"])
+    current_close = float(bar["close"])
+    current_sma20 = previous_sma20 + (current_close - previous_close) / 20.0
 
-    # Reconstruct today's live SMA20 from yesterday's completed SMA20 and close.
-    current_sma20 = previous_sma20 + (float(cmp) - previous_close) / 20.0
+    weekly = append_current_bar(decode_history(row.get("weekly_history")), bar)
+    monthly = append_current_bar(decode_history(row.get("monthly_history")), bar)
+
+    if len(weekly) < 60 or len(monthly) < 20:
+        return None
+
+    weekly_rsi = float(rsi(weekly["Close"], 14).iloc[-1])
+    weekly_bb = float(bb_upper(weekly["Close"], 20, 2).iloc[-1])
+    weekly_st = float(supertrend(weekly, 7, 3).iloc[-1])
+    weekly_close = float(weekly["Close"].iloc[-1])
+    monthly_rsi = float(rsi(monthly["Close"], 14).iloc[-1])
+
+    values = [weekly_close, weekly_rsi, weekly_bb, weekly_st, monthly_rsi, current_sma20]
+    if not all(math.isfinite(x) for x in values):
+        return None
 
     if not (
-        weekly_close >= weekly_supertrend
+        weekly_close >= weekly_st
         and weekly_rsi > 60
-        and weekly_close >= weekly_upper_bb
+        and weekly_close >= weekly_bb
+        and monthly_rsi > 60
         and previous_close < previous_sma20
-        and float(cmp) > current_sma20
+        and current_close > current_sma20
     ):
         return None
 
     return {
-        "signal_date": datetime.now(IST).date().isoformat(),
-        "signal_price": float(cmp),
+        "signal_date": bar["date"],
+        "signal_price": current_close,
         "previous_date": str(row.get("previous_date", "")),
         "previous_close": previous_close,
         "previous_sma20": previous_sma20,
         "daily_sma20": current_sma20,
-        "weekly_date": str(row.get("weekly_date", "")),
+        "weekly_date": str(weekly.index[-1].date()),
         "weekly_close": weekly_close,
         "weekly_rsi": weekly_rsi,
-        "weekly_supertrend": weekly_supertrend,
-        "weekly_upper_bb": weekly_upper_bb,
-        "monthly_date": str(row.get("monthly_date", "")),
-        "monthly_rsi": float(row["monthly_rsi"]) if pd.notna(row.get("monthly_rsi")) else None,
+        "weekly_supertrend": weekly_st,
+        "weekly_upper_bb": weekly_bb,
+        "monthly_date": str(monthly.index[-1].date()),
+        "monthly_rsi": monthly_rsi,
+        "last_bar_time": bar["last_bar_time"],
     }
 
 def save_scan_results(matches, universe, now):
@@ -166,7 +278,6 @@ def save_scan_results(matches, universe, now):
     meta = universe.copy()
     meta["YF_TICKER"] = meta["YF_TICKER"].fillna("").astype(str).str.strip()
     meta = meta.drop_duplicates("YF_TICKER").set_index("YF_TICKER")
-
     rows = []
     for ticker, setup in matches:
         info = meta.loc[ticker] if ticker in meta.index else pd.Series(dtype=object)
@@ -179,7 +290,7 @@ def save_scan_results(matches, universe, now):
             "ticker": ticker,
             "name": info.get("NAME", ""),
             "signal_price": setup["signal_price"],
-            "price_source": "Latest/current 1m CMP from yfinance",
+            "price_source": "Latest/current 1m CMP + current-day OHLC from yfinance",
             "previous_date": setup["previous_date"],
             "previous_close": setup["previous_close"],
             "previous_sma20": setup["previous_sma20"],
@@ -191,65 +302,51 @@ def save_scan_results(matches, universe, now):
             "weekly_upper_bb": setup["weekly_upper_bb"],
             "monthly_date": setup["monthly_date"],
             "monthly_rsi": setup["monthly_rsi"],
-            "strategy": "MSB_BASE_V2_SNAPSHOT_CMP",
+            "strategy": STRATEGY,
         })
 
     new = pd.DataFrame(rows, columns=RESULT_COLUMNS)
-
-    if os.path.exists(RESULTS) and os.path.getsize(RESULTS) > 0:
-        old = pd.read_csv(RESULTS)
-    else:
-        old = pd.DataFrame(columns=RESULT_COLUMNS)
-
+    old = pd.read_csv(RESULTS) if os.path.exists(RESULTS) and os.path.getsize(RESULTS) > 0 else pd.DataFrame(columns=RESULT_COLUMNS)
     old = old.reindex(columns=RESULT_COLUMNS)
     combined = pd.concat([old, new], ignore_index=True)
-    combined = combined.drop_duplicates(
-        subset=["scan_date","ticker","strategy"], keep="first"
-    ).sort_values(["scan_date","ticker"]).reset_index(drop=True)
-
+    combined = combined.drop_duplicates(subset=["scan_date","ticker","strategy"], keep="first")
+    combined = combined.sort_values(["scan_date","ticker"]).reset_index(drop=True)
     combined.to_csv(RESULTS, index=False)
     old_unique = old.drop_duplicates(subset=["scan_date","ticker","strategy"])
-    added = len(combined) - len(old_unique)
-    print(f"Stored {max(0, added)} new scan results in {RESULTS}; total rows={len(combined)}")
-    return max(0, added)
+    added = max(0, len(combined) - len(old_unique))
+    print(f"Stored {added} new scan results in {RESULTS}; total rows={len(combined)}")
+    return added
 
 def send_success_alert(scanned, matches, fresh, failed, duration):
     now = datetime.now(IST)
     status = "SUCCESS" if failed == 0 else "PARTIAL"
-    lines = [
-        "📊 NSE+BSE MSB INTRADAY SCAN",
-        "",
+    return tg("\n".join([
+        "📊 NSE+BSE MSB NON-REPAINT INTRADAY SCAN","",
         f"🟢 Status: {status}" if failed == 0 else f"🟡 Status: {status}",
         f"🕒 Time: {now.strftime('%d-%b-%Y %I:%M %p')} IST",
-        f"📡 Run: {run_type()}",
-        "",
+        f"📡 Run: {run_type()}","",
         f"📈 Stocks scanned: {scanned:,}",
         f"🎯 MSB matches: {matches:,}",
-        f"🆕 New CSV records: {fresh:,}",
+        f"🆕 New alerts: {fresh:,}",
         f"⚠️ Failed/skipped: {failed:,}",
-        f"⏱️ Duration: {fmt_duration(duration)}",
-        "",
-        "Strategy:",
-        *STRATEGY_LINES,
-        "",
+        f"⏱️ Duration: {fmt_duration(duration)}","",
+        "Strategy:","* AS-OF current timestamp; no future HTF candle values",
+        *STRATEGY_LINES,"",
         "💾 Results: scan_results.csv",
-        "📚 Weekly/previous-day indicators: market_snapshot.csv",
-        "💰 Signal price = latest/current 1m CMP at scan time",
+        "📚 Completed HTF history: market_snapshot.csv",
+        "💰 Signal price = latest/current 1m CMP",
         "",
         "🔄 Universe: NSE + BSE Equities",
         "🤖 Data: yfinance",
-    ]
-    return tg("\n".join(lines))
+    ]))
 
 def send_failure_alert(reason, scanned, total, duration):
     now = datetime.now(IST)
     return tg("\n".join([
-        "🔴 NSE+BSE MSB INTRADAY SCAN",
-        "",
+        "🔴 NSE+BSE MSB NON-REPAINT INTRADAY SCAN","",
         "🔴 Scan Status: FAILED",
         f"🕒 Time: {now.strftime('%d-%b-%Y %I:%M %p')} IST",
-        f"📡 Run: {run_type()}",
-        "",
+        f"📡 Run: {run_type()}","",
         f"Reason: {reason}",
         f"Stocks scanned: {scanned:,} / {total:,}",
         f"⏱️ Duration: {fmt_duration(duration)}",
@@ -258,9 +355,7 @@ def send_failure_alert(reason, scanned, total, duration):
 def main():
     started = time.monotonic()
     now = datetime.now(IST)
-    event = os.getenv("GITHUB_EVENT_NAME", "schedule")
-
-    if event == "schedule" and now.weekday() >= 5:
+    if os.getenv("GITHUB_EVENT_NAME", "schedule") == "schedule" and now.weekday() >= 5:
         print("Scheduled scan on weekend:", now)
         return
 
@@ -268,41 +363,30 @@ def main():
         u = pd.read_csv("symbols.csv")
         snap = pd.read_csv(SNAPSHOT)
     except Exception as e:
-        raise RuntimeError(
-            f"Required universe/snapshot file missing: {e}. "
-            "Run the daily universe refresh first."
-        )
+        raise RuntimeError(f"Required universe/snapshot file missing: {e}. Run the daily universe refresh first.")
 
-    if "YF_TICKER" not in u.columns or "ticker" not in snap.columns:
-        raise RuntimeError("symbols.csv or market_snapshot.csv has an invalid schema.")
+    required_cols = {"YF_TICKER","ticker","weekly_history","monthly_history"}
+    if not required_cols.issubset(u.columns | snap.columns):
+        missing = sorted(required_cols - set(snap.columns))
+        raise RuntimeError(f"market_snapshot.csv is missing AS-OF history columns: {missing}. Run universe_refresh once after this update.")
 
-    # The 15-minute scanner uses frozen historical/HTF values from the morning
-    # snapshot and downloads only the latest CMP. It never downloads daily history.
-    ts = (
-        snap["ticker"].dropna().astype(str).str.strip()
-        .loc[lambda x: x.ne("") & x.ne("nan")]
-        .unique().tolist()
-    )
-
+    ts = snap["ticker"].dropna().astype(str).str.strip().loc[lambda x: x.ne("") & x.ne("nan")].unique().tolist()
     total = len(ts)
     print("Scanning", total, "snapshot-covered eligible stocks")
     if total == 0:
         raise RuntimeError("Market snapshot is empty.")
 
-    prices, price_failed = get_live_prices(ts)
-
-    matches = []
-    failed = price_failed
-    scanned = 0
-
+    prices, price_failed = get_live_bars(ts)
     snap = snap.drop_duplicates("ticker").set_index("ticker")
+    matches, failed, scanned = [], price_failed, 0
+
     for ticker in ts:
         scanned += 1
-        cmp = prices.get(ticker)
-        if cmp is None:
+        bar = prices.get(ticker)
+        if bar is None or ticker not in snap.index:
             continue
         try:
-            setup = live_setup(snap.loc[ticker], cmp)
+            setup = asof_setup(snap.loc[ticker], bar)
             if setup:
                 matches.append((ticker, setup))
         except Exception as e:
@@ -321,17 +405,10 @@ def main():
     save(state)
 
     duration = time.monotonic() - started
-    print(
-        "Universe:", total,
-        "Scanned:", scanned,
-        "CMP available:", len(prices),
-        "Matches:", len(matches),
-        "New alerts:", len(fresh),
-        "CSV records:", stored,
-        "Failed:", failed,
-    )
-
-    send_success_alert(scanned, len(matches), stored, failed, duration)
+    print("Universe:", total, "Scanned:", scanned, "Live bars:", len(prices),
+          "Matches:", len(matches), "New alerts:", len(fresh),
+          "CSV records:", stored, "Failed:", failed)
+    send_success_alert(scanned, len(matches), len(fresh), failed, duration)
 
 if __name__ == "__main__":
     try:
