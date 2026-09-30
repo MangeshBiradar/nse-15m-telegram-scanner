@@ -10,6 +10,7 @@ from zoneinfo import ZoneInfo
 
 STATE = "state.json"
 RESULTS = "scan_results.csv"
+RUN_HISTORY = "scan_runs.csv"
 SNAPSHOT = "market_snapshot.csv"
 BATCH = 40
 IST = ZoneInfo("Asia/Kolkata")
@@ -317,6 +318,29 @@ def save_scan_results(matches, universe, now):
     print(f"Stored {added} new scan results in {RESULTS}; total rows={len(combined)}")
     return added
 
+def save_run_history(now, scanned, live_bars, matches, fresh, failed, stored, duration):
+    columns = [
+        "run_time_ist","run_type","scan_date","scanned","live_bars",
+        "matches","new_alerts","failed","new_result_rows","duration_seconds","status"
+    ]
+    row = pd.DataFrame([{
+        "run_time_ist": now.strftime("%Y-%m-%d %H:%M:%S"),
+        "run_type": run_type(),
+        "scan_date": now.date().isoformat(),
+        "scanned": scanned,
+        "live_bars": live_bars,
+        "matches": matches,
+        "new_alerts": fresh,
+        "failed": failed,
+        "new_result_rows": stored,
+        "duration_seconds": round(duration, 2),
+        "status": "SUCCESS" if failed == 0 else "PARTIAL",
+    }], columns=columns)
+    old = pd.read_csv(RUN_HISTORY) if os.path.exists(RUN_HISTORY) and os.path.getsize(RUN_HISTORY) > 0 else pd.DataFrame(columns=columns)
+    old = old.reindex(columns=columns)
+    pd.concat([old, row], ignore_index=True).to_csv(RUN_HISTORY, index=False)
+    print(f"Stored scan run in {RUN_HISTORY}; total runs={len(old)+1}")
+
 def send_success_alert(scanned, matches, fresh, failed, duration):
     now = datetime.now(IST)
     status = "SUCCESS" if failed == 0 else "PARTIAL"
@@ -395,6 +419,9 @@ def main():
 
     stored = save_scan_results(matches, u, now)
 
+    duration = time.monotonic() - started
+    save_run_history(now, scanned, len(prices), len(matches), 0, failed, stored, duration)
+
     state = load()
     fresh = []
     for ticker, setup in matches:
@@ -404,8 +431,7 @@ def main():
             fresh.append((ticker, setup))
     save(state)
 
-    duration = time.monotonic() - started
-    print("Universe:", total, "Scanned:", scanned, "Live bars:", len(prices),
+    duration = time.monotonic() - started\n    print("Universe:", total, "Scanned:", scanned, "Live bars:", len(prices),
           "Matches:", len(matches), "New alerts:", len(fresh),
           "CSV records:", stored, "Failed:", failed)
     send_success_alert(scanned, len(matches), len(fresh), failed, duration)
