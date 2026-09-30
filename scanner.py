@@ -406,6 +406,25 @@ def save_run_history(now, scanned, live_bars, matches, fresh, failed, stored, du
     pd.concat([old, row], ignore_index=True).to_csv(RUN_HISTORY, index=False)
     print(f"Stored scan run in {RUN_HISTORY}; total runs={len(old)+1}")
 
+def send_data_pull_alert(total, live_bars, failed, duration):
+    now = datetime.now(IST)
+    status = "SUCCESS" if failed == 0 else "PARTIAL"
+    return tg("\\n".join([
+        "📡 NSE+BSE MARKET DATA PULL",
+        "",
+        f"🟢 Status: {status}" if failed == 0 else f"🟡 Status: {status}",
+        f"🕒 Time: {now.strftime('%d-%b-%Y %I:%M %p')} IST",
+        f"📡 Run: {run_type()}",
+        "",
+        f"📈 Stocks requested: {total:,}",
+        f"✅ Fresh intraday data: {live_bars:,}",
+        f"⚠️ Failed/skipped: {failed:,}",
+        f"⏱️ Duration: {fmt_duration(duration)}",
+        "",
+        "Data: yfinance 1m CMP/current-day OHLC + 15m completed candles",
+        "15m confirmation uses the latest completed 15-minute candle.",
+    ]))
+
 def send_success_alert(scanned, matches, fresh, failed, duration):
     now = datetime.now(IST)
     status = "SUCCESS" if failed == 0 else "PARTIAL"
@@ -466,6 +485,8 @@ def main():
         raise RuntimeError("Market snapshot is empty.")
 
     prices, price_failed = get_live_bars(ts)
+    data_pull_duration = time.monotonic() - started
+    send_data_pull_alert(total, len(prices), price_failed, data_pull_duration)
     snap = snap.drop_duplicates("ticker").set_index("ticker")
     matches, failed, scanned = [], price_failed, 0
 
@@ -494,7 +515,8 @@ def main():
     save(state)
 
     duration = time.monotonic() - started
-    save_run_history(now, scanned, len(prices), len(matches), len(fresh), failed, stored, duration)\n    print("Universe:", total, "Scanned:", scanned, "Live bars:", len(prices),
+    save_run_history(now, scanned, len(prices), len(matches), len(fresh), failed, stored, duration)
+    print("Universe:", total, "Scanned:", scanned, "Live bars:", len(prices),
           "Matches:", len(matches), "New alerts:", len(fresh),
           "CSV records:", stored, "Failed:", failed)
     send_success_alert(scanned, len(matches), len(fresh), failed, duration)
