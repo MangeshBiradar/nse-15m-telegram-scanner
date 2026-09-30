@@ -475,7 +475,7 @@ def main():
         raise RuntimeError(f"Required universe/snapshot file missing: {e}. Run the daily universe refresh first.")
 
     required_cols = {"YF_TICKER","ticker","weekly_history","monthly_history"}
-    if not required_cols.issubset(u.columns | snap.columns):
+    if not required_cols.issubset(set(u.columns) | set(snap.columns)):
         missing = sorted(required_cols - set(snap.columns))
         raise RuntimeError(f"market_snapshot.csv is missing AS-OF history columns: {missing}. Run universe_refresh once after this update.")
 
