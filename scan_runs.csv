@@ -1,2 +1,3 @@
 run_time_ist,run_type,scan_date,scanned,live_bars,matches,new_alerts,failed,new_result_rows,duration_seconds,status
 2026-09-30 22:48:51,Manual,2026-09-30,2060,2052,0,0,8,0,260.57,PARTIAL
+2026-09-30 22:55:13,Manual,2026-09-30,2060,2053,0,0,7,0,189.9,PARTIAL
