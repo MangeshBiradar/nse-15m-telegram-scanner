@@ -21,7 +21,7 @@ STRATEGY_LINES = [
     "• Weekly RSI(14) > 60",
     "• Weekly Close >= Weekly Upper BB(20,2)",
     "• Previous Daily Close < Previous Daily SMA20",
-    "• 15-minute Close > 15-minute Open",
+    "• Latest completed 15-minute Close > Current Daily SMA20",
 ]
 
 RESULT_COLUMNS = [
@@ -298,7 +298,7 @@ def asof_setup(row, bar):
         and weekly_rsi > 60
         and weekly_close >= weekly_bb
         and previous_close < previous_sma20
-        and float(bar["15m_close"]) > float(bar["15m_open"])
+        and float(bar["15m_close"]) > current_sma20
     ):
         return None
 
