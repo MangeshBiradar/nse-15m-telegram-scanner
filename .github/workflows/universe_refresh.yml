@@ -36,14 +36,22 @@ jobs:
         run: |
           python market_data.py
 
-      - name: Validate market snapshot
+      - name: Validate AS-OF market snapshot
         run: |
           python - <<'PY'
           import pandas as pd
           df = pd.read_csv("market_snapshot.csv")
+          required = {"ticker", "weekly_history", "monthly_history", "monthly_rsi"}
+          missing = sorted(required - set(df.columns))
+          if missing:
+              raise SystemExit(f"Snapshot schema missing: {missing}")
           if len(df) < 500:
               raise SystemExit(f"Snapshot validation failed: {len(df)} rows")
-          print(f"Snapshot OK: {len(df)} stocks")
+          if df["weekly_history"].isna().sum() > len(df) * 0.01:
+              raise SystemExit("Snapshot validation failed: too many missing weekly histories")
+          if df["monthly_history"].isna().sum() > len(df) * 0.01:
+              raise SystemExit("Snapshot validation failed: too many missing monthly histories")
+          print(f"AS-OF snapshot OK: {len(df)} stocks")
           PY
 
       - name: Commit refreshed universe and market snapshot
