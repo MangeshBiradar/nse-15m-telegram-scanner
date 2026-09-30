@@ -1,4 +1,5 @@
-import os, math, time
+import math
+import time
 import pandas as pd
 import numpy as np
 import yfinance as yf
@@ -6,8 +7,7 @@ from indicators import supertrend, rsi, bb_upper, sma
 
 IST = "Asia/Kolkata"
 END = pd.Timestamp.now(tz=IST).normalize().tz_localize(None)
-START_3M = END - pd.DateOffset(months=3)
-INTRADAY_START = max(START_3M, END - pd.Timedelta(days=59))
+START = END - pd.DateOffset(months=3)
 BATCH = 30
 
 def clean(d):
@@ -25,45 +25,63 @@ def clean(d):
     return d.dropna(subset=need).sort_index()
 
 def tf(d, rule):
-    x=d.resample(rule).agg({"Open":"first","High":"max","Low":"min","Close":"last","Volume":"sum"})
+    x = d.resample(rule).agg({"Open":"first","High":"max","Low":"min","Close":"last","Volume":"sum"})
     return x.dropna(subset=["Open","High","Low","Close"])
 
-def base_on_day(d, day):
-    d = d.loc[d.index <= day]
+def asof_signal(d, day):
+    # Critical non-repaint rule: ONLY data with timestamp <= signal day is used.
+    d = d.loc[d.index <= day].copy()
     if len(d) < 120:
         return False
     w, m = tf(d, "W-FRI"), tf(d, "ME")
-    if len(w)<60 or len(m)<20:
+    if len(w) < 60 or len(m) < 20:
         return False
-    st=supertrend(w,7,3); wr=rsi(w.Close,14); wb=bb_upper(w.Close,20,2)
-    ds=sma(d.Close,20)
-    vals=[w.Close.iloc[-1],st.iloc[-1],wr.iloc[-1],wb.iloc[-1],
-          d.Close.iloc[-2],ds.iloc[-2],d.Close.iloc[-1],ds.iloc[-1]]
+
+    st = supertrend(w, 7, 3)
+    wr = rsi(w["Close"], 14)
+    wb = bb_upper(w["Close"], 20, 2)
+    mr = rsi(m["Close"], 14)
+    ds = sma(d["Close"], 20)
+
+    vals = [
+        w["Close"].iloc[-1], st.iloc[-1], wr.iloc[-1], wb.iloc[-1],
+        mr.iloc[-1], d["Close"].iloc[-2], ds.iloc[-2],
+        d["Close"].iloc[-1], ds.iloc[-1],
+    ]
     if not all(math.isfinite(float(x)) for x in vals):
         return False
-    return (vals[0]>=vals[1] and vals[2]>60 and vals[0]>=vals[3]
-            and vals[4]<vals[5] and vals[6]>vals[7])
+
+    return (
+        vals[0] >= vals[1] and
+        vals[2] > 60 and
+        vals[0] >= vals[3] and
+        vals[4] > 60 and
+        vals[5] < vals[6] and
+        vals[7] > vals[8]
+    )
 
 def forward_metrics(d, signal_day, entry):
-    future=d.loc[d.index > signal_day]
+    future = d.loc[d.index > signal_day]
     if future.empty:
         return {}
-    out={}
+    out = {}
     for n in (1,3,5,10):
-        x=future.iloc[:n]
-        if len(x)<n:
-            out[f"close_{n}d"]=np.nan; out[f"high_{n}d"]=np.nan
+        x = future.iloc[:n]
+        if len(x) < n:
+            out[f"close_{n}d"] = np.nan
+            out[f"high_{n}d"] = np.nan
         else:
-            out[f"close_{n}d"]=100*(x.Close.iloc[-1]/entry-1)
-            out[f"high_{n}d"]=100*(x.High.max()/entry-1)
-    x=future.iloc[:10]
-    out["max_gain_10d"]=100*(x.High.max()/entry-1) if len(x) else np.nan
-    out["max_dd_10d"]=100*(x.Low.min()/entry-1) if len(x) else np.nan
+            out[f"close_{n}d"] = 100*(x.Close.iloc[-1]/entry-1)
+            out[f"high_{n}d"] = 100*(x.High.max()/entry-1)
+    x = future.iloc[:10]
+    out["max_gain_10d"] = 100*(x.High.max()/entry-1) if len(x) else np.nan
+    out["max_dd_10d"] = 100*(x.Low.min()/entry-1) if len(x) else np.nan
     return out
 
 def summarize(df, name):
-    if df.empty: return {"test":name,"signals":0}
-    z={"test":name,"signals":len(df),"unique_stocks":df.ticker.nunique()}
+    if df.empty:
+        return {"test":name,"signals":0}
+    z = {"test":name,"signals":len(df),"unique_stocks":df.ticker.nunique()}
     for n in (1,3,5,10):
         for kind in ("close","high"):
             c=f"{kind}_{n}d"
@@ -82,78 +100,45 @@ u=pd.read_csv("symbols.csv")
 tickers=(u.YF_TICKER.dropna().astype(str).str.strip()
          .loc[lambda x:x.ne("") & x.ne("nan")].unique().tolist())
 
-base_rows=[]
-exact_rows=[]
+rows=[]
 failed=[]
-
-print(f"Universe={len(tickers)} start={START_3M.date()} end={END.date()} intraday_start={INTRADAY_START.date()}")
+print(f"Universe={len(tickers)} start={START.date()} end={END.date()}")
 
 for i in range(0,len(tickers),BATCH):
     batch=tickers[i:i+BATCH]
     try:
-        data=yf.download(batch,start=(START_3M-pd.Timedelta(days=420)).strftime("%Y-%m-%d"),
-                         end=(END+pd.Timedelta(days=1)).strftime("%Y-%m-%d"),
-                         interval="1d",group_by="ticker",auto_adjust=False,progress=False,threads=True)
+        data=yf.download(
+            batch,
+            start=(START-pd.Timedelta(days=420)).strftime("%Y-%m-%d"),
+            end=(END+pd.Timedelta(days=1)).strftime("%Y-%m-%d"),
+            interval="1d", group_by="ticker", auto_adjust=False,
+            progress=False, threads=True,
+        )
     except Exception as e:
-        failed.extend((t,"daily_download",str(e)) for t in batch); continue
+        failed.extend((t,"daily_download",str(e)) for t in batch)
+        continue
+
     for t in batch:
         try:
             d=clean(data if len(batch)==1 else (data[t] if t in data.columns.get_level_values(0) else None))
-            if d is None: continue
-            days=d.index[(d.index>=START_3M)&(d.index<=END)]
+            if d is None:
+                continue
+            days=d.index[(d.index>=START)&(d.index<=END)]
             for day in days:
-                if base_on_day(d,day):
+                if asof_signal(d, day):
                     entry=float(d.loc[day,"Close"])
                     row={"ticker":t,"signal_date":day.date(),"entry":entry}
                     row.update(forward_metrics(d,day,entry))
-                    base_rows.append(row)
+                    rows.append(row)
         except Exception as e:
             failed.append((t,"daily",str(e)))
     time.sleep(.15)
 
-base=pd.DataFrame(base_rows)
-
-# Exact-current test: retain only base signals whose last available 15m bar for that
-# signal date closes above its 15m SMA20. Yahoo intraday history is limited to ~60 days.
-if not base.empty:
-    candidate_dates=base[["ticker","signal_date"]].copy()
-    for i in range(0,len(candidate_dates),BATCH):
-        batch=candidate_dates.iloc[i:i+BATCH].ticker.unique().tolist()
-        try:
-            data=yf.download(batch,start=INTRADAY_START.strftime("%Y-%m-%d"),
-                             end=(END+pd.Timedelta(days=1)).strftime("%Y-%m-%d"),
-                             interval="15m",group_by="ticker",auto_adjust=False,progress=False,threads=True)
-        except Exception as e:
-            failed.extend((t,"15m_download",str(e)) for t in batch); continue
-        for t in batch:
-            try:
-                d15=clean(data if len(batch)==1 else (data[t] if t in data.columns.get_level_values(0) else None))
-                if d15 is None: continue
-                d15["sma20"]=sma(d15.Close,20)
-                days=set(pd.to_datetime(candidate_dates.loc[candidate_dates.ticker.eq(t),"signal_date"]).dt.date)
-                for day in days:
-                    x=d15[d15.index.date==day]
-                    if x.empty: continue
-                    last=x.iloc[-1]
-                    if pd.notna(last.sma20) and last.Close>last.sma20:
-                        b=base[(base.ticker==t)&(base.signal_date==day)]
-                        for _,r in b.iterrows():
-                            rr=r.to_dict()
-                            rr["15m_close"]=float(last.Close)
-                            rr["15m_sma20"]=float(last.sma20)
-                            rr["signal_time"]=str(x.index[-1])
-                            exact_rows.append(rr)
-            except Exception as e:
-                failed.append((t,"15m",str(e)))
-        time.sleep(.15)
-
-exact=pd.DataFrame(exact_rows)
-
-base.to_csv("backtest_3m_base.csv",index=False)
-exact.to_csv("backtest_exact_current_~60d.csv",index=False)
-pd.DataFrame([summarize(base,"3M_BASE"),summarize(exact,"EXACT_CURRENT_~60D")]).to_csv("backtest_summary.csv",index=False)
+result=pd.DataFrame(rows)
+result.to_csv("backtest_3m_non_repaint.csv",index=False)
+pd.DataFrame([summarize(result,"3M_NON_REPAINT")]).to_csv("backtest_summary.csv",index=False)
 pd.DataFrame(failed,columns=["ticker","stage","error"]).to_csv("backtest_failures.csv",index=False)
 
 print("\nSUMMARY")
-print(pd.DataFrame([summarize(base,"3M_BASE"),summarize(exact,"EXACT_CURRENT_~60D")]).to_string(index=False))
-print("\nBase signals:",len(base),"Exact signals:",len(exact),"Failures:",len(failed))
+print(pd.DataFrame([summarize(result,"3M_NON_REPAINT")]).to_string(index=False))
+print("\nNon-repaint signals:",len(result),"Failures:",len(failed))
