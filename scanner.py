@@ -419,9 +419,6 @@ def main():
 
     stored = save_scan_results(matches, u, now)
 
-    duration = time.monotonic() - started
-    save_run_history(now, scanned, len(prices), len(matches), 0, failed, stored, duration)
-
     state = load()
     fresh = []
     for ticker, setup in matches:
@@ -431,7 +428,8 @@ def main():
             fresh.append((ticker, setup))
     save(state)
 
-    duration = time.monotonic() - started\n    print("Universe:", total, "Scanned:", scanned, "Live bars:", len(prices),
+    duration = time.monotonic() - started
+    save_run_history(now, scanned, len(prices), len(matches), len(fresh), failed, stored, duration)\n    print("Universe:", total, "Scanned:", scanned, "Live bars:", len(prices),
           "Matches:", len(matches), "New alerts:", len(fresh),
           "CSV records:", stored, "Failed:", failed)
     send_success_alert(scanned, len(matches), len(fresh), failed, duration)
