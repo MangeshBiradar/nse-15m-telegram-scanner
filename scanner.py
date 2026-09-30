@@ -14,7 +14,7 @@ RUN_HISTORY = "scan_runs.csv"
 SNAPSHOT = "market_snapshot.csv"
 BATCH = 40
 IST = ZoneInfo("Asia/Kolkata")
-STRATEGY = "MSB_BASE_V3_ASOF_NON_REPAINT"
+STRATEGY = "MSB_BASE_V4_ASOF_15M_CONFIRMATION"
 
 STRATEGY_LINES = [
     "• Weekly Close >= Weekly Supertrend(7,3)",
