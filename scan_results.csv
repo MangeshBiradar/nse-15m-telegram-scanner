@@ -1,1 +1,1 @@
-scan_date,scan_time_ist,run_type,exchange,symbol,ticker,name,signal_price,price_source,previous_close,previous_sma20,daily_sma20,weekly_close,weekly_rsi,weekly_supertrend,weekly_upper_bb,monthly_rsi,strategy
+scan_date,scan_time_ist,run_type,exchange,symbol,ticker,name,signal_price,price_source,previous_date,previous_close,previous_sma20,daily_sma20,weekly_date,weekly_close,weekly_rsi,weekly_supertrend,weekly_upper_bb,monthly_date,monthly_rsi,intraday_15m_time,intraday_15m_close,intraday_15m_rsi,intraday_15m_supertrend,previous_15m_high,strategy
