@@ -4,3 +4,4 @@ run_time_ist,run_type,scan_date,scanned,live_bars,matches,new_alerts,failed,new_
 2026-09-30 23:20:57,Manual,2026-09-30,2060,2053,0,0,7,0,302.22,PARTIAL
 2026-10-01 11:04:07,Manual,2026-10-01,2060,2031,0,0,29,0,196.91,PARTIAL
 2026-10-01 11:35:50,Manual,2026-10-01,2060,2035,0,0,25,0,256.22,PARTIAL
+2026-10-01 15:57:27,Scheduled,2026-10-01,2060,2054,0,0,6,0,295.39,PARTIAL
