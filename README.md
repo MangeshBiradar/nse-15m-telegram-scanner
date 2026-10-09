@@ -1,42 +1,30 @@
-# NSE+BSE V2.1 Weekly Signal Scanner
+# On-demand NSE+BSE Chartink Conditions Scanner
 
-This is V2.1 of the existing yfinance-based scanner. **No Angel One SmartAPI is used.**
+A **manual/on-demand only** GitHub Actions scanner using Yahoo Finance via `yfinance`. It does not use Angel One SmartAPI and has no scheduled cron run in its new workflow.
 
-## Strategy
-- Weekly Close >= Weekly Supertrend
-- Weekly Close >= Weekly Upper Bollinger Band
-- Weekly RSI >= 60
-- Previous trading-day Close < 20-day SMA
+## Run it
+1. Open the repository on GitHub.
+2. Select **Actions → On-demand Chartink Conditions Scanner**.
+3. Click **Run workflow → Run workflow**.
+4. Open the completed run and download the **on-demand-scan-results** artifact. If Telegram secrets are configured, matches are also sent to Telegram.
 
-## Schedule
-GitHub Actions runs at:
-- 09:15 IST (03:45 UTC), Monday-Friday
-- 03:00 PM IST (09:30 UTC), Monday-Friday
+## Conditions (all six must pass)
+1. Weekly Close > Weekly Supertrend(7,3)
+2. Weekly Close > Weekly Upper Bollinger Band(20,2)
+3. Weekly RSI(14) > 60
+4. Monthly RSI(14) > 55
+5. Previous trading day's Close < its Daily SMA(20)
+6. Latest completed 15-minute Close > current-as-of Daily SMA(20)
 
-Universe refresh remains at 08:30 IST (03:00 UTC), Monday-Friday.
+## Output
+- `scan_results.csv`: matched symbols and the values used for each condition
+- `scan_errors.csv`: symbols whose market data or indicators could not be evaluated
+- GitHub Actions artifact: `on-demand-scan-results`
+- Optional Telegram summary using repository secrets `TELEGRAM_BOT_TOKEN` and `TELEGRAM_CHAT_ID`
 
-## V2.1 fixes
-### 1. Empty universe protection
-The exchange universe refresh now:
-- bootstraps an NSE session before downloading the official equity list;
-- retries NSE/BSE requests;
-- rejects suspiciously small/partial feeds;
-- preserves a previously valid universe instead of overwriting it with an empty/partial file;
-- includes an emergency NSE seed universe so a fresh repository never starts with `Scanning 0 eligible stocks`.
-
-When the official live universe refresh succeeds, `symbols.csv` is replaced with the live NSE+BSE universe.
-
-### 2. Telegram 403 protection
-Telegram errors are now **non-fatal**. A 403 is printed with a useful configuration hint, but the scanner itself does not crash while trying to send an alert.
-
-GitHub Secrets required:
-- `TELEGRAM_BOT_TOKEN`
-- `TELEGRAM_CHAT_ID`
-
-If Telegram is not configured, the scanner still runs and reports the result in the GitHub Actions log.
-
-## Data
-Yahoo Finance via `yfinance` is retained as the market-data source, as in V2. This version does not use Angel One SmartAPI.
-
-## Important
-The schedule is twice daily, but the strategy calculation continues to use **daily yfinance candles aggregated to weekly data**. It is not a true 15-minute-candle strategy.
+## Implementation notes
+- Uses the current `symbols.csv` universe already in the repository.
+- Uses the latest **completed** 15-minute candle, not an unfinished candle.
+- Weekly and monthly bars are recalculated as-of the latest available 15-minute price, so the active week/month can change while markets are open.
+- The daily SMA20 comparison uses the latest 19 completed daily closes plus the latest completed 15-minute close; the previous-day comparison uses the prior completed daily close and its 20-day SMA.
+- Yahoo Finance data can be delayed, incomplete, or unavailable for individual tickers. Check `scan_errors.csv`; this is not an exchange-grade real-time feed.
