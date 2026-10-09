@@ -101,6 +101,13 @@ def main():
             bar = complete.iloc[-1]
             bar_time = complete.index[-1]
             latest_price = float(bar["Close"])
+            intraday_today = complete[complete.index.date == now.date()]
+            if intraday_today.empty:
+                raise ValueError("No completed 15-minute candle for current date")
+            day_open = float(intraday_today["Open"].iloc[0]) if "Open" in intraday_today.columns else latest_price
+            day_high = float(intraday_today["High"].max()) if "High" in intraday_today.columns else latest_price
+            day_low = float(intraday_today["Low"].min()) if "Low" in intraday_today.columns else latest_price
+            day_volume = float(intraday_today["Volume"].fillna(0).sum()) if "Volume" in intraday_today.columns else 0.0
             # Keep only completed daily candles for the prior-day comparison and daily SMA.
             today = now.date()
             hist = daily[daily.index.date < today].copy()
@@ -113,10 +120,10 @@ def main():
             if not latest_price > daily_sma20: continue
             # Build current as-of weekly/monthly candles using the latest intraday price.
             daily_asof = hist.copy()
-            current_day = pd.DataFrame([{"Open":float(bar.get("Open",latest_price)),
-                                         "High":float(bar.get("High",latest_price)),
-                                         "Low":float(bar.get("Low",latest_price)),
-                                         "Close":latest_price,"Volume":float(bar.get("Volume",0) or 0)}],
+            current_day = pd.DataFrame([{"Open":day_open,
+                                         "High":day_high,
+                                         "Low":day_low,
+                                         "Close":latest_price,"Volume":day_volume}],
                                        index=[pd.Timestamp(today)])
             daily_asof = pd.concat([daily_asof[["Open","High","Low","Close","Volume"]], current_day])
             weekly, monthly = resample_ohlc(daily_asof, "W-FRI"), resample_ohlc(daily_asof, "ME")
