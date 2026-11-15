@@ -1,0 +1,8 @@
+smartapi-python
+pandas
+pandas-ta
+pyotp
+requests
+python-dotenv
+logzero
+websocket-client
