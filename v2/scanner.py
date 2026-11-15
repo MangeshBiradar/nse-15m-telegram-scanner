@@ -33,16 +33,26 @@ if not all([API_KEY, CLIENT_CODE, PIN, TOTP_SECRET]):
 
 IST = ZoneInfo("Asia/Kolkata")
 TOKEN_CACHE_FILE = "nse_tokens_cache.json"
-TODAY_STR = datetime.now(IST).strftime("%Y-%m-%d")
+
+
+def get_trading_session_date():
+    """Rolls the cache session forward at 3:35 PM IST once NSE EOD candles finalize."""
+    now_ist = datetime.now(IST)
+    if now_ist.hour > 15 or (now_ist.hour == 15 and now_ist.minute >= 35):
+        return (now_ist + timedelta(days=1)).strftime("%Y-%m-%d")
+    return now_ist.strftime("%Y-%m-%d")
+
+
+TODAY_STR = get_trading_session_date()
 CANDLE_CACHE_DIR = os.path.join("candle_cache", TODAY_STR)
 
 
 def prepare_daily_cache(force_refresh=False):
-    """Creates today's IST historical cache folder, clearing old days or forcing refresh."""
+    """Creates current session cache folder, clearing old sessions or forcing refresh."""
     base_dir = "candle_cache"
     if force_refresh and os.path.exists(CANDLE_CACHE_DIR):
         shutil.rmtree(CANDLE_CACHE_DIR, ignore_errors=True)
-        print("Cleared today's candle cache (--refresh-cache).")
+        print("Cleared current session candle cache (--refresh-cache).")
 
     os.makedirs(CANDLE_CACHE_DIR, exist_ok=True)
     for folder in os.listdir(base_dir):
@@ -239,21 +249,22 @@ def fetch_live_ohlc_batch(smart_api, tokens, limiter):
 
 
 def get_combined_candles(smart_api, symbol, token, limiter, live_ohlc_map):
-    """Loads completed daily candles from IST disk cache and appends today's live candle during an active session."""
+    """Caches finalized EOD candles after 3:35 PM IST and appends live candles during market hours."""
     cache_path = os.path.join(CANDLE_CACHE_DIR, f"{symbol}.pkl")
-    today_ts = pd.Timestamp(TODAY_STR)
+    now_ist = datetime.now(IST)
+    cal_today_ts = pd.Timestamp(now_ist.strftime("%Y-%m-%d"))
+    is_post_close = now_ist.hour > 15 or (now_ist.hour == 15 and now_ist.minute >= 35)
 
     if os.path.exists(cache_path):
         df_hist = pd.read_pickle(cache_path)
     else:
-        to_date = datetime.now(IST)
-        from_date = to_date - timedelta(days=1500)
+        from_date = now_ist - timedelta(days=1500)
         params = {
             "exchange": "NSE",
             "symboltoken": str(token),
             "interval": "ONE_DAY",
             "fromdate": from_date.strftime("%Y-%m-%d 09:15"),
-            "todate": to_date.strftime("%Y-%m-%d 15:30"),
+            "todate": now_ist.strftime("%Y-%m-%d 15:30"),
         }
         res = call_with_retry(lambda: smart_api.getCandleData(params), limiter)
         if not res or not res.get("status") or not res.get("data"):
@@ -263,11 +274,15 @@ def get_combined_candles(smart_api, symbol, token, limiter, live_ohlc_map):
         )
         df["timestamp"] = pd.to_datetime(df["timestamp"]).dt.tz_localize(None)
         df = df.set_index("timestamp")
-        df_hist = df[df.index.normalize() < today_ts]
+
+        if is_post_close:
+            df_hist = df[df.index.normalize() <= cal_today_ts]
+        else:
+            df_hist = df[df.index.normalize() < cal_today_ts]
         df_hist.to_pickle(cache_path)
 
     live_bar = live_ohlc_map.get(str(token))
-    if live_bar and today_ts.weekday() < 5 and not df_hist.empty:
+    if live_bar and cal_today_ts.weekday() < 5 and not is_post_close and not df_hist.empty:
         last_bar = df_hist.iloc[-1]
         is_duplicate_candle = (
             round(float(last_bar["open"]), 2) == round(live_bar["open"], 2)
@@ -278,14 +293,14 @@ def get_combined_candles(smart_api, symbol, token, limiter, live_ohlc_map):
         )
         if not is_duplicate_candle:
             today_row = pd.DataFrame(
-                [live_bar], index=pd.DatetimeIndex([today_ts], name="timestamp")
+                [live_bar], index=pd.DatetimeIndex([cal_today_ts], name="timestamp")
             )
             df_combined = pd.concat([df_hist, today_row])
             return df_combined[~df_combined.index.duplicated(keep="last")]
 
     return df_hist
 def evaluate_stock(df_daily, check_c5=True):
-    """Evaluates weekly and daily conditions using previous daily candle and current daily candle."""
+    """Evaluates weekly and daily technical conditions."""
     if df_daily is None or len(df_daily) < 200:
         return False, None
 
@@ -351,7 +366,7 @@ def evaluate_stock(df_daily, check_c5=True):
 
 
 def send_telegram_alert(universe_name, matches, elapsed, match_csv):
-    """Sends matching stock results and CSV attachment to Telegram using IST timestamp."""
+    """Dispatches screening results and CSV reports via Telegram."""
     bot_token = (os.getenv("TELEGRAM_BOT_TOKEN") or "").strip()
     chat_id = (os.getenv("TELEGRAM_CHAT_ID") or "").strip()
     if not bot_token or not chat_id:
@@ -407,6 +422,7 @@ def send_telegram_alert(universe_name, matches, elapsed, match_csv):
 
 
 def process_single_symbol(idx, symbol, smart_api, token_cache, cache_lock, limiter, live_ohlc_map, check_c5):
+    """Processes symbol token lookup, candle aggregation, and evaluation."""
     with cache_lock:
         token = token_cache.get(symbol)
 
@@ -436,13 +452,14 @@ def process_single_symbol(idx, symbol, smart_api, token_cache, cache_lock, limit
 
 
 def run_screener():
+    """Main execution entry point for parsing arguments, running multi-threaded scans, and outputting reports."""
     parser = argparse.ArgumentParser(description="Angel One SmartAPI Stock Screener")
     parser.add_argument("--universe", choices=["nifty50", "nifty500", "all"])
     parser.add_argument("--skip-cmp-sma", action="store_true")
     parser.add_argument(
         "--refresh-cache",
         action="store_true",
-        help="Force re-download of today's historical candle cache",
+        help="Force re-download of current session historical candle cache",
     )
     args = parser.parse_args()
 
