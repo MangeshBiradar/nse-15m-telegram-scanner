@@ -6,18 +6,20 @@ on:
       universe:
         description: 'Universe to scan (nifty50, nifty500, all)'
         required: true
-        default: 'nifty500'
+        default: 'all'
       skip_cmp_sma:
         description: 'Skip Condition 5 (CMP > Daily 20 SMA)?'
         type: boolean
         default: false
+      refresh_cache:
+        description: 'Force refresh historical candle cache?'
+        type: boolean
+        default: false
   schedule:
-    # Mon-Fri at 8:45 AM IST (03:15 UTC) - builds cache & scans pre-market
-    - cron: '15 3 * * 1-5'
-    # Mon-Fri at 9:20 AM IST (03:50 UTC) - live market open scan
+    # Mon-Fri at 4:00 PM IST (10:30 UTC) - post-market EOD scan & cache build for next morning
+    - cron: '30 10 * * 1-5'
+    # Mon-Fri at 9:20 AM IST (03:50 UTC) - morning market open scan using cached EOD history
     - cron: '50 3 * * 1-5'
-    # Mon-Fri at 3:15 PM IST (09:45 UTC) - pre-close scan
-    - cron: '45 9 * * 1-5'
 
 jobs:
   run-screener:
@@ -54,12 +56,15 @@ jobs:
           TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
           TELEGRAM_CHAT_ID: ${{ secrets.TELEGRAM_CHAT_ID }}
         run: |
-          UNIVERSE="${{ github.event.inputs.universe || 'nifty500' }}"
-          SKIP_FLAG=""
+          UNIVERSE="${{ github.event.inputs.universe || 'all' }}"
+          FLAGS=""
           if [ "${{ github.event.inputs.skip_cmp_sma }}" == "true" ]; then
-            SKIP_FLAG="--skip-cmp-sma"
+            FLAGS="$FLAGS --skip-cmp-sma"
           fi
-          python v2/scanner.py --universe "$UNIVERSE" $SKIP_FLAG
+          if [ "${{ github.event.inputs.refresh_cache }}" == "true" ]; then
+            FLAGS="$FLAGS --refresh-cache"
+          fi
+          python v2/scanner.py --universe "$UNIVERSE" $FLAGS
 
       - name: Upload CSV Reports
         uses: actions/upload-artifact@v4
