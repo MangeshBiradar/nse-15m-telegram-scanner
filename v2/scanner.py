@@ -8,7 +8,8 @@ import threading
 import time
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from datetime import datetime, timedelta
-from urllib.parse import urljoin
+from urllib.parse import urljoin, urlunparse
+from zoneinfo import ZoneInfo
 
 import logzero
 import pandas as pd
@@ -17,7 +18,6 @@ import pyotp
 import requests
 from dotenv import load_dotenv
 from SmartApi import SmartConnect
-from urllib.parse import urlunparse
 
 logzero.loglevel(logging.ERROR)
 logging.getLogger("smartConnect").setLevel(logging.ERROR)
@@ -31,13 +31,14 @@ TOTP_SECRET = os.getenv("ANGEL_TOTP_SECRET")
 if not all([API_KEY, CLIENT_CODE, PIN, TOTP_SECRET]):
     raise ValueError("Missing one or more Angel One credentials in .env file.")
 
+IST = ZoneInfo("Asia/Kolkata")
 TOKEN_CACHE_FILE = "nse_tokens_cache.json"
-TODAY_STR = datetime.now().strftime("%Y-%m-%d")
+TODAY_STR = datetime.now(IST).strftime("%Y-%m-%d")
 CANDLE_CACHE_DIR = os.path.join("candle_cache", TODAY_STR)
 
 
 def prepare_daily_cache(force_refresh=False):
-    """Creates today's historical cache folder, clearing old days or forcing refresh."""
+    """Creates today's IST historical cache folder, clearing old days or forcing refresh."""
     base_dir = "candle_cache"
     if force_refresh and os.path.exists(CANDLE_CACHE_DIR):
         shutil.rmtree(CANDLE_CACHE_DIR, ignore_errors=True)
@@ -238,14 +239,14 @@ def fetch_live_ohlc_batch(smart_api, tokens, limiter):
 
 
 def get_combined_candles(smart_api, symbol, token, limiter, live_ohlc_map):
-    """Loads completed daily candles from disk cache and appends today's live candle only during an active new session."""
+    """Loads completed daily candles from IST disk cache and appends today's live candle during an active session."""
     cache_path = os.path.join(CANDLE_CACHE_DIR, f"{symbol}.pkl")
     today_ts = pd.Timestamp(TODAY_STR)
 
     if os.path.exists(cache_path):
         df_hist = pd.read_pickle(cache_path)
     else:
-        to_date = datetime.now()
+        to_date = datetime.now(IST)
         from_date = to_date - timedelta(days=1500)
         params = {
             "exchange": "NSE",
@@ -348,11 +349,9 @@ def evaluate_stock(df_daily, check_c5=True):
         "Matched": is_match,
     }
 
-from urllib.parse import urlunparse
-
 
 def send_telegram_alert(universe_name, matches, elapsed, match_csv):
-    """Sends matching stock results and CSV attachment to Telegram."""
+    """Sends matching stock results and CSV attachment to Telegram using IST timestamp."""
     bot_token = (os.getenv("TELEGRAM_BOT_TOKEN") or "").strip()
     chat_id = (os.getenv("TELEGRAM_CHAT_ID") or "").strip()
     if not bot_token or not chat_id:
@@ -363,7 +362,8 @@ def send_telegram_alert(universe_name, matches, elapsed, match_csv):
     send_msg_url = urlunparse(("https", host, f"/bot{bot_token}/sendMessage", "", "", ""))
     send_doc_url = urlunparse(("https", host, f"/bot{bot_token}/sendDocument", "", "", ""))
 
-    header = f"📊 *{universe_name.upper()} Screener ({TODAY_STR})*\n⏱ Completed in {elapsed}s\n\n"
+    now_ist = datetime.now(IST).strftime("%Y-%m-%d %H:%M IST")
+    header = f"📊 *{universe_name.upper()} Screener ({now_ist})*\n⏱ Completed in {elapsed}s\n\n"
 
     try:
         if not matches:
@@ -404,6 +404,7 @@ def send_telegram_alert(universe_name, matches, elapsed, match_csv):
         print("Telegram alert sent successfully.")
     except Exception as e:
         print(f"Failed to send Telegram alert: {e}")
+
 
 def process_single_symbol(idx, symbol, smart_api, token_cache, cache_lock, limiter, live_ohlc_map, check_c5):
     with cache_lock:
