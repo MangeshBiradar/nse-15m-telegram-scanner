@@ -347,26 +347,29 @@ def evaluate_stock(df_daily, check_c5=True):
         "Matched": is_match,
     }
 
-
 def send_telegram_alert(universe_name, matches, elapsed, match_csv):
     """Sends matching stock results and CSV attachment to Telegram."""
-    bot_token = os.getenv("TELEGRAM_BOT_TOKEN")
-    chat_id = os.getenv("TELEGRAM_CHAT_ID")
+    bot_token = (os.getenv("TELEGRAM_BOT_TOKEN") or "").strip()
+    chat_id = (os.getenv("TELEGRAM_CHAT_ID") or "").strip()
     if not bot_token or not chat_id:
         print("Telegram credentials not set; skipping alert.")
         return
 
-    base_url = f"https://telegram.org{bot_token}"
+    tg_host = "https://" + "api.telegram" + ".org/"
+    send_msg_url = urljoin(tg_host, f"bot{bot_token}/sendMessage")
+    send_doc_url = urljoin(tg_host, f"bot{bot_token}/sendDocument")
+
     header = f"📊 *{universe_name.upper()} Screener ({TODAY_STR})*\n⏱ Completed in {elapsed}s\n\n"
 
     try:
         if not matches:
             text = header + "No stocks matched all active criteria today."
             requests.post(
-                f"{base_url}/sendMessage",
+                send_msg_url,
                 json={"chat_id": chat_id, "text": text, "parse_mode": "Markdown"},
                 timeout=15,
             )
+            print("Telegram alert sent successfully.")
             return
 
         lines = [header + f"✅ *{len(matches)} Match(es) Found:*\n"]
@@ -378,7 +381,7 @@ def send_telegram_alert(universe_name, matches, elapsed, match_csv):
         text = "\n".join(lines)
 
         requests.post(
-            f"{base_url}/sendMessage",
+            send_msg_url,
             json={"chat_id": chat_id, "text": text, "parse_mode": "Markdown"},
             timeout=15,
         )
@@ -386,7 +389,7 @@ def send_telegram_alert(universe_name, matches, elapsed, match_csv):
         if os.path.exists(match_csv):
             with open(match_csv, "rb") as f:
                 requests.post(
-                    f"{base_url}/sendDocument",
+                    send_doc_url,
                     data={"chat_id": chat_id, "caption": f"{universe_name.upper()} Matches CSV"},
                     files={"document": f},
                     timeout=20,
@@ -394,7 +397,6 @@ def send_telegram_alert(universe_name, matches, elapsed, match_csv):
         print("Telegram alert sent successfully.")
     except Exception as e:
         print(f"Failed to send Telegram alert: {e}")
-
 
 def process_single_symbol(idx, symbol, smart_api, token_cache, cache_lock, limiter, live_ohlc_map, check_c5):
     with cache_lock:
