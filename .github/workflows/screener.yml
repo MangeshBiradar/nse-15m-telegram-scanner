@@ -43,7 +43,7 @@ jobs:
             angel-cache-
 
       - name: Install dependencies
-        run: pip install -r requirements.txt
+        run: pip install -r v2/requirements.txt
 
       - name: Run Screener
         env:
@@ -59,7 +59,7 @@ jobs:
           if [ "${{ github.event.inputs.skip_cmp_sma }}" == "true" ]; then
             SKIP_FLAG="--skip-cmp-sma"
           fi
-          python scanner.py --universe "$UNIVERSE" $SKIP_FLAG
+          python v2/scanner.py --universe "$UNIVERSE" $SKIP_FLAG
 
       - name: Upload CSV Reports
         uses: actions/upload-artifact@v4
