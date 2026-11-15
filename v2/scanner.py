@@ -348,6 +348,54 @@ def evaluate_stock(df_daily, check_c5=True):
     }
 
 
+def send_telegram_alert(universe_name, matches, elapsed, match_csv):
+    """Sends matching stock results and CSV attachment to Telegram."""
+    bot_token = os.getenv("TELEGRAM_BOT_TOKEN")
+    chat_id = os.getenv("TELEGRAM_CHAT_ID")
+    if not bot_token or not chat_id:
+        print("Telegram credentials not set; skipping alert.")
+        return
+
+    base_url = f"https://telegram.org{bot_token}"
+    header = f"📊 *{universe_name.upper()} Screener ({TODAY_STR})*\n⏱ Completed in {elapsed}s\n\n"
+
+    try:
+        if not matches:
+            text = header + "No stocks matched all active criteria today."
+            requests.post(
+                f"{base_url}/sendMessage",
+                json={"chat_id": chat_id, "text": text, "parse_mode": "Markdown"},
+                timeout=15,
+            )
+            return
+
+        lines = [header + f"✅ *{len(matches)} Match(es) Found:*\n"]
+        for m in matches:
+            lines.append(
+                f"• *{m['Symbol']}* | CMP: `{m['CMP']}` | W\\_RSI: `{m['W_RSI']}` | "
+                f"W\\_BB: `{m['W_BB_Upper']}` | PrevC: `{m['Prev_Candle_Close']}`"
+            )
+        text = "\n".join(lines)
+
+        requests.post(
+            f"{base_url}/sendMessage",
+            json={"chat_id": chat_id, "text": text, "parse_mode": "Markdown"},
+            timeout=15,
+        )
+
+        if os.path.exists(match_csv):
+            with open(match_csv, "rb") as f:
+                requests.post(
+                    f"{base_url}/sendDocument",
+                    data={"chat_id": chat_id, "caption": f"{universe_name.upper()} Matches CSV"},
+                    files={"document": f},
+                    timeout=20,
+                )
+        print("Telegram alert sent successfully.")
+    except Exception as e:
+        print(f"Failed to send Telegram alert: {e}")
+
+
 def process_single_symbol(idx, symbol, smart_api, token_cache, cache_lock, limiter, live_ohlc_map, check_c5):
     with cache_lock:
         token = token_cache.get(symbol)
@@ -469,6 +517,8 @@ def run_screener():
         print(f"\nSaved matches to {match_csv} and full report to {all_csv}")
     else:
         print(f"No stocks matched the active criteria. Full report saved to {all_csv}")
+
+    send_telegram_alert(universe_name, matches, elapsed, match_csv)
 
 
 if __name__ == "__main__":
