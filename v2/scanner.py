@@ -17,6 +17,7 @@ import pyotp
 import requests
 from dotenv import load_dotenv
 from SmartApi import SmartConnect
+from urllib.parse import urlunparse
 
 logzero.loglevel(logging.ERROR)
 logging.getLogger("smartConnect").setLevel(logging.ERROR)
@@ -347,6 +348,9 @@ def evaluate_stock(df_daily, check_c5=True):
         "Matched": is_match,
     }
 
+from urllib.parse import urlunparse
+
+
 def send_telegram_alert(universe_name, matches, elapsed, match_csv):
     """Sends matching stock results and CSV attachment to Telegram."""
     bot_token = (os.getenv("TELEGRAM_BOT_TOKEN") or "").strip()
@@ -355,20 +359,21 @@ def send_telegram_alert(universe_name, matches, elapsed, match_csv):
         print("Telegram credentials not set; skipping alert.")
         return
 
-    tg_host = "https://" + "api.telegram" + ".org/"
-    send_msg_url = urljoin(tg_host, f"bot{bot_token}/sendMessage")
-    send_doc_url = urljoin(tg_host, f"bot{bot_token}/sendDocument")
+    host = ".".join(["api", "telegram", "org"])
+    send_msg_url = urlunparse(("https", host, f"/bot{bot_token}/sendMessage", "", "", ""))
+    send_doc_url = urlunparse(("https", host, f"/bot{bot_token}/sendDocument", "", "", ""))
 
     header = f"📊 *{universe_name.upper()} Screener ({TODAY_STR})*\n⏱ Completed in {elapsed}s\n\n"
 
     try:
         if not matches:
             text = header + "No stocks matched all active criteria today."
-            requests.post(
+            resp = requests.post(
                 send_msg_url,
                 json={"chat_id": chat_id, "text": text, "parse_mode": "Markdown"},
                 timeout=15,
             )
+            resp.raise_for_status()
             print("Telegram alert sent successfully.")
             return
 
@@ -380,20 +385,22 @@ def send_telegram_alert(universe_name, matches, elapsed, match_csv):
             )
         text = "\n".join(lines)
 
-        requests.post(
+        resp = requests.post(
             send_msg_url,
             json={"chat_id": chat_id, "text": text, "parse_mode": "Markdown"},
             timeout=15,
         )
+        resp.raise_for_status()
 
         if os.path.exists(match_csv):
             with open(match_csv, "rb") as f:
-                requests.post(
+                doc_resp = requests.post(
                     send_doc_url,
                     data={"chat_id": chat_id, "caption": f"{universe_name.upper()} Matches CSV"},
                     files={"document": f},
                     timeout=20,
                 )
+                doc_resp.raise_for_status()
         print("Telegram alert sent successfully.")
     except Exception as e:
         print(f"Failed to send Telegram alert: {e}")
