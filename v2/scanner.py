@@ -300,7 +300,7 @@ def get_combined_candles(smart_api, symbol, token, limiter, live_ohlc_map):
 
     return df_hist
 def evaluate_stock(df_daily, check_c5=True):
-    """Evaluates weekly and daily technical conditions."""
+    """Evaluates the 5 conditions with short-circuit (fail-fast) exits for speed."""
     if df_daily is None or len(df_daily) < 200:
         return False, None
 
@@ -314,6 +314,17 @@ def evaluate_stock(df_daily, check_c5=True):
     cmp = float(df_daily["close"].iloc[-1])
     curr_sma20 = float(df_daily["sma20"].iloc[-1])
 
+    # Fail-fast Condition 4: Previous daily candle close < Previous daily candle SMA 20
+    c4 = prev_candle_close < prev_candle_sma20
+    if not c4:
+        return False, None
+
+    # Fail-fast Condition 5: CMP > Daily SMA 20 (if enabled)
+    c5 = cmp > curr_sma20
+    if check_c5 and not c5:
+        return False, None
+
+    # Resample to weekly only for stocks that passed the daily SMA checks
     df_weekly = (
         df_daily.resample("W-SUN")
         .agg({"open": "first", "high": "max", "low": "min", "close": "last", "volume": "sum"})
@@ -322,51 +333,52 @@ def evaluate_stock(df_daily, check_c5=True):
     if len(df_weekly) < 30:
         return False, None
 
-    st = ta.supertrend(df_weekly["high"], df_weekly["low"], df_weekly["close"], length=7, multiplier=3)
-    df_weekly["rsi14"] = ta.rsi(df_weekly["close"], length=14)
-    bb = ta.bbands(df_weekly["close"], length=20, std=2, ddof=0)
-
-    st_cols = [c for c in st.columns if c.startswith("SUPERT_7_")]
-    bbu_cols = [c for c in bb.columns if c.startswith("BBU_20_")]
-    if not st_cols or not bbu_cols:
-        return False, None
-
     w_close = float(df_weekly["close"].iloc[-1])
-    w_supertrend = float(st[st_cols[0]].iloc[-1])
-    w_rsi = float(df_weekly["rsi14"].iloc[-1])
-    w_bb_upper = float(bb[bbu_cols[0]].iloc[-1])
 
-    if any(pd.isna([w_supertrend, w_rsi, w_bb_upper])):
+    # Fail-fast Condition 2: Weekly RSI (14) > 60
+    rsi_series = ta.rsi(df_weekly["close"], length=14)
+    w_rsi = float(rsi_series.iloc[-1])
+    if pd.isna(w_rsi) or not (w_rsi > 60):
         return False, None
 
-    c1 = w_close > w_supertrend
-    c2 = w_rsi > 60
-    c3 = w_close > w_bb_upper
-    c4 = prev_candle_close < prev_candle_sma20
-    c5 = cmp > curr_sma20
+    # Fail-fast Condition 3: Weekly close > Weekly Upper Bollinger Band (20, 2, ddof=0)
+    bb = ta.bbands(df_weekly["close"], length=20, std=2, ddof=0)
+    bbu_cols = [c for c in bb.columns if c.startswith("BBU_20_")]
+    if not bbu_cols:
+        return False, None
+    w_bb_upper = float(bb[bbu_cols].iloc[-1])
+    if pd.isna(w_bb_upper) or not (w_close > w_bb_upper):
+        return False, None
 
-    is_match = all([c1, c2, c3, c4, c5] if check_c5 else [c1, c2, c3, c4])
+    # Fail-fast Condition 1: Weekly close > Weekly Supertrend (7, 3)
+    st = ta.supertrend(df_weekly["high"], df_weekly["low"], df_weekly["close"], length=7, multiplier=3)
+    st_cols = [c for c in st.columns if c.startswith("SUPERT_7_")]
+    if not st_cols:
+        return False, None
+    w_supertrend = float(st[st_cols].iloc[-1])
+    if pd.isna(w_supertrend) or not (w_close > w_supertrend):
+        return False, None
 
-    return is_match, {
+    return True, {
         "W_Close": round(w_close, 2),
         "W_ST_7_3": round(w_supertrend, 2),
-        "C1_W_ST": c1,
+        "C1_W_ST": True,
         "W_RSI": round(w_rsi, 2),
-        "C2_W_RSI": c2,
+        "C2_W_RSI": True,
         "W_BB_Upper": round(w_bb_upper, 2),
-        "C3_W_BB": c3,
+        "C3_W_BB": True,
         "Prev_Candle_Close": round(prev_candle_close, 2),
         "Prev_Candle_SMA20": round(prev_candle_sma20, 2),
-        "C4_Prev_Candle_Below_SMA": c4,
+        "C4_Prev_Candle_Below_SMA": True,
         "CMP": round(cmp, 2),
         "Daily_SMA20": round(curr_sma20, 2),
         "C5_CMP_Above_SMA": c5 if check_c5 else f"SKIP ({c5})",
-        "Matched": is_match,
+        "Matched": True,
     }
 
 
 def send_telegram_alert(universe_name, matches, elapsed, match_csv):
-    """Dispatches screening results and CSV reports via Telegram."""
+    """Sends matching stock results and CSV attachment to Telegram."""
     bot_token = (os.getenv("TELEGRAM_BOT_TOKEN") or "").strip()
     chat_id = (os.getenv("TELEGRAM_CHAT_ID") or "").strip()
     if not bot_token or not chat_id:
@@ -393,11 +405,13 @@ def send_telegram_alert(universe_name, matches, elapsed, match_csv):
             return
 
         lines = [header + f"✅ *{len(matches)} Match(es) Found:*\n"]
-        for m in matches:
+        for m in matches[:25]:
             lines.append(
                 f"• *{m['Symbol']}* | CMP: `{m['CMP']}` | W\\_RSI: `{m['W_RSI']}` | "
                 f"W\\_BB: `{m['W_BB_Upper']}` | PrevC: `{m['Prev_Candle_Close']}`"
             )
+        if len(matches) > 25:
+            lines.append(f"_...and {len(matches) - 25} more (see attached CSV)_")
         text = "\n".join(lines)
 
         resp = requests.post(
@@ -421,8 +435,8 @@ def send_telegram_alert(universe_name, matches, elapsed, match_csv):
         print(f"Failed to send Telegram alert: {e}")
 
 
-def process_single_symbol(idx, symbol, smart_api, token_cache, cache_lock, limiter, live_ohlc_map, check_c5):
-    """Processes symbol token lookup, candle aggregation, and evaluation."""
+def process_single_symbol(idx, symbol, smart_api, token_cache, cache_lock, limiter, live_ohlc_map, check_c5, cache_only):
+    """Fetches candles (populating cache) and evaluates conditions unless cache_only is set."""
     with cache_lock:
         token = token_cache.get(symbol)
 
@@ -440,19 +454,24 @@ def process_single_symbol(idx, symbol, smart_api, token_cache, cache_lock, limit
                     break
 
     if not token:
-        return idx, symbol, None, None, fetched_new, "SKIP (Token not found)"
+        return idx, symbol, False, None, fetched_new, "SKIP (Token not found)"
 
     df_daily = get_combined_candles(smart_api, symbol, token, limiter, live_ohlc_map)
+    if df_daily is None or len(df_daily) < 200:
+        return idx, symbol, False, None, fetched_new, "SKIP (Insufficient data)"
+
+    if cache_only:
+        return idx, symbol, False, None, fetched_new, "CACHED"
+
     is_match, m = evaluate_stock(df_daily, check_c5=check_c5)
-    if m is None:
-        return idx, symbol, None, None, fetched_new, "SKIP (Insufficient data)"
+    if not is_match or m is None:
+        return idx, symbol, False, None, fetched_new, None
 
     m["Symbol"] = symbol
-    return idx, symbol, is_match, m, fetched_new, None
+    return idx, symbol, True, m, fetched_new, None
 
 
 def run_screener():
-    """Main execution entry point for parsing arguments, running multi-threaded scans, and outputting reports."""
     parser = argparse.ArgumentParser(description="Angel One SmartAPI Stock Screener")
     parser.add_argument("--universe", choices=["nifty50", "nifty500", "all"])
     parser.add_argument("--skip-cmp-sma", action="store_true")
@@ -460,6 +479,11 @@ def run_screener():
         "--refresh-cache",
         action="store_true",
         help="Force re-download of current session historical candle cache",
+    )
+    parser.add_argument(
+        "--cache-only",
+        action="store_true",
+        help="Build historical candle cache only without evaluating or sending Telegram alert",
     )
     args = parser.parse_args()
 
@@ -474,21 +498,33 @@ def run_screener():
     limiter = RateLimiter(max_per_second=1.8)
     cache_updated = False
 
-    print("Fetching batch live intraday OHLC quotes...")
-    cached_tokens = [token_cache.get(s) for s in watchlist if token_cache.get(s)]
-    live_ohlc_map = fetch_live_ohlc_batch(smart_api, cached_tokens, limiter)
+    live_ohlc_map = {}
+    if not args.cache_only:
+        print("Fetching batch live intraday OHLC quotes...")
+        cached_tokens = [token_cache.get(s) for s in watchlist if token_cache.get(s)]
+        live_ohlc_map = fetch_live_ohlc_batch(smart_api, cached_tokens, limiter)
 
-    matches, all_scanned = [], []
+    matches = []
     total = len(watchlist)
     completed = 0
     start_time = time.perf_counter()
     c5_status = "ENABLED" if check_c5 else "DISABLED"
-    print(f"Scanning {total} stocks in [{universe_name.upper()}] | Condition 5: {c5_status}\n")
+    mode_label = "CACHE-ONLY" if args.cache_only else f"Condition 5: {c5_status}"
+    print(f"Scanning {total} stocks in [{universe_name.upper()}] | {mode_label}\n")
 
     with ThreadPoolExecutor(max_workers=2) as executor:
         futures = {
             executor.submit(
-                process_single_symbol, idx, sym, smart_api, token_cache, cache_lock, limiter, live_ohlc_map, check_c5
+                process_single_symbol,
+                idx,
+                sym,
+                smart_api,
+                token_cache,
+                cache_lock,
+                limiter,
+                live_ohlc_map,
+                check_c5,
+                args.cache_only,
             ): sym
             for idx, sym in enumerate(watchlist, start=1)
         }
@@ -496,27 +532,27 @@ def run_screener():
         for future in as_completed(futures):
             completed += 1
             try:
-                _, symbol, is_match, m, fetched_new, skip_reason = future.result()
+                _, symbol, is_match, m, fetched_new, status_msg = future.result()
                 if fetched_new:
                     cache_updated = True
-                if skip_reason:
-                    print(f"[{completed}/{total}] {symbol:<12} | {skip_reason}")
+
+                if status_msg and status_msg != "CACHED":
+                    print(f"[{completed}/{total}] {symbol:<12} | {status_msg}")
                     continue
 
-                all_scanned.append(m)
-                if is_match:
+                if is_match and m:
                     matches.append(m)
-
-                tag = "MATCH" if is_match else "SCAN "
-                c5_label = f"{'Y' if m['C5_CMP_Above_SMA'] is True else 'N'}" if check_c5 else "OFF"
-                print(
-                    f"[{completed}/{total}] [{tag}] {symbol:<12} | "
-                    f"W_C:{m['W_Close']} > W_ST:{m['W_ST_7_3']} ({'Y' if m['C1_W_ST'] else 'N'}) | "
-                    f"W_RSI:{m['W_RSI']}>60 ({'Y' if m['C2_W_RSI'] else 'N'}) | "
-                    f"W_C:{m['W_Close']} > W_BB:{m['W_BB_Upper']} ({'Y' if m['C3_W_BB'] else 'N'}) | "
-                    f"PrevC:{m['Prev_Candle_Close']} < PrevSMA:{m['Prev_Candle_SMA20']} ({'Y' if m['C4_Prev_Candle_Below_SMA'] else 'N'}) | "
-                    f"CMP:{m['CMP']} > SMA20:{m['Daily_SMA20']} ({c5_label})"
-                )
+                    c5_label = f"{'Y' if m['C5_CMP_Above_SMA'] is True else 'N'}" if check_c5 else "OFF"
+                    print(
+                        f"[{completed}/{total}] [MATCH] {symbol:<12} | "
+                        f"W_C:{m['W_Close']} > W_ST:{m['W_ST_7_3']} (Y) | "
+                        f"W_RSI:{m['W_RSI']}>60 (Y) | "
+                        f"W_C:{m['W_Close']} > W_BB:{m['W_BB_Upper']} (Y) | "
+                        f"PrevC:{m['Prev_Candle_Close']} < PrevSMA:{m['Prev_Candle_SMA20']} (Y) | "
+                        f"CMP:{m['CMP']} > SMA20:{m['Daily_SMA20']} ({c5_label})"
+                    )
+                elif completed % 250 == 0 or completed == total:
+                    print(f"[{completed}/{total}] Processed {completed}/{total} stocks... ({len(matches)} matches so far)")
 
                 if cache_updated and completed % 100 == 0:
                     with cache_lock:
@@ -530,20 +566,20 @@ def run_screener():
             save_token_cache(token_cache)
 
     elapsed = round(time.perf_counter() - start_time, 1)
-    all_csv = f"{universe_name}_all_scan.csv"
+
+    if args.cache_only:
+        print(f"\nCache build complete in {elapsed}s (--cache-only mode). Skipping Telegram alert.")
+        return
+
     match_csv = f"{universe_name}_matches.csv"
-
-    if all_scanned:
-        pd.DataFrame(all_scanned).set_index("Symbol").to_csv(all_csv)
-
     print(f"\n--- {universe_name.upper()} MATCHING STOCKS (Completed in {elapsed}s) ---")
     if matches:
         results_df = pd.DataFrame(matches).set_index("Symbol")
         print(results_df.to_string())
         results_df.to_csv(match_csv)
-        print(f"\nSaved matches to {match_csv} and full report to {all_csv}")
+        print(f"\nSaved matches to {match_csv}")
     else:
-        print(f"No stocks matched the active criteria. Full report saved to {all_csv}")
+        print("No stocks matched all active criteria.")
 
     send_telegram_alert(universe_name, matches, elapsed, match_csv)
 
