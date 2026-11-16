@@ -1,4 +1,4 @@
-name: Angel One Stock Screener
+name: Angel One Stock Screener (v2)
 
 on:
   workflow_dispatch:
@@ -15,15 +15,22 @@ on:
         description: 'Force refresh historical candle cache?'
         type: boolean
         default: false
+      cache_only:
+        description: 'Build cache only (skip Telegram alert)?'
+        type: boolean
+        default: false
   schedule:
-    # Mon-Fri at 4:00 PM IST (10:30 UTC) - post-market EOD scan & cache build for next morning
-    - cron: '30 10 * * 1-5'
-    # Mon-Fri at 9:20 AM IST (03:50 UTC) - morning market open scan using cached EOD history
-    - cron: '50 3 * * 1-5'
+    # Sun-Thu at 11:15 PM IST (17:45 UTC) - overnight low-traffic cache load for Mon-Fri mornings
+    - cron: '45 17 * * 0-4'
+    # Mon-Fri at 9:30 AM IST (04:00 UTC) - live market scan using overnight cache + Telegram alert
+    - cron: '0 4 * * 1-5'
 
 jobs:
   run-screener:
     runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: v2
     steps:
       - name: Checkout repository
         uses: actions/checkout@v4
@@ -33,21 +40,24 @@ jobs:
         with:
           python-version: '3.12'
           cache: 'pip'
+          cache-dependency-path: v2/requirements.txt
 
       - name: Restore daily candle & token cache
         uses: actions/cache@v4
         with:
           path: |
-            nse_tokens_cache.json
-            candle_cache
-          key: angel-cache-${{ github.run_id }}
+            v2/nse_tokens_cache.json
+            v2/candle_cache
+          key: angel-v2-cache-${{ github.run_id }}
           restore-keys: |
-            angel-cache-
+            angel-v2-cache-
 
       - name: Install dependencies
+        working-directory: .
         run: pip install -r v2/requirements.txt
 
       - name: Run Screener
+        working-directory: .
         env:
           ANGEL_API_KEY: ${{ secrets.ANGEL_API_KEY }}
           ANGEL_CLIENT_CODE: ${{ secrets.ANGEL_CLIENT_CODE }}
@@ -58,18 +68,26 @@ jobs:
         run: |
           UNIVERSE="${{ github.event.inputs.universe || 'all' }}"
           FLAGS=""
+
+          # Overnight 11:15 PM IST schedule builds cache silently without sending Telegram alert
+          if [ "${{ github.event.schedule }}" == "45 17 * * 0-4" ] || [ "${{ github.event.inputs.cache_only }}" == "true" ]; then
+            FLAGS="$FLAGS --cache-only"
+          fi
+
           if [ "${{ github.event.inputs.skip_cmp_sma }}" == "true" ]; then
             FLAGS="$FLAGS --skip-cmp-sma"
           fi
+
           if [ "${{ github.event.inputs.refresh_cache }}" == "true" ]; then
             FLAGS="$FLAGS --refresh-cache"
           fi
-          python v2/scanner.py --universe "$UNIVERSE" $FLAGS
+
+          cd v2 && python scanner.py --universe "$UNIVERSE" $FLAGS
 
       - name: Upload CSV Reports
+        if: always()
         uses: actions/upload-artifact@v4
         with:
-          name: scan-reports-${{ github.run_number }}
+          name: scan-reports-v2-${{ github.run_number }}
           path: |
-            *_matches.csv
-            *_all_scan.csv
+            v2/*_matches.csv
