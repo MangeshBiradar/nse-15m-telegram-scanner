@@ -249,7 +249,7 @@ def fetch_live_ohlc_batch(smart_api, tokens, limiter):
 
 
 def get_combined_candles(smart_api, symbol, token, limiter, live_ohlc_map):
-    """Caches finalized EOD candles after 3:35 PM IST and appends live candles during market hours."""
+    """Caches 400 days of finalized EOD candles and appends live candles during market hours."""
     cache_path = os.path.join(CANDLE_CACHE_DIR, f"{symbol}.pkl")
     now_ist = datetime.now(IST)
     cal_today_ts = pd.Timestamp(now_ist.strftime("%Y-%m-%d"))
@@ -258,7 +258,7 @@ def get_combined_candles(smart_api, symbol, token, limiter, live_ohlc_map):
     if os.path.exists(cache_path):
         df_hist = pd.read_pickle(cache_path)
     else:
-        from_date = now_ist - timedelta(days=1500)
+        from_date = now_ist - timedelta(days=400)
         params = {
             "exchange": "NSE",
             "symboltoken": str(token),
@@ -301,21 +301,20 @@ def get_combined_candles(smart_api, symbol, token, limiter, live_ohlc_map):
     return df_hist
 def evaluate_stock(df_daily, check_c5=True):
     """Evaluates the 5 conditions with short-circuit (fail-fast) exits for speed."""
-    if df_daily is None or len(df_daily) < 105:
+    if df_daily is None or len(df_daily) < 95:
         return False, None
 
     df_daily = df_daily.sort_index()
     df_daily["sma20"] = ta.sma(df_daily["close"], length=20)
-    if pd.isna(df_daily["sma20"].iloc[-2]):
+    if pd.isna(df_daily["sma20"].iloc[-1]):
         return False, None
 
-    prev_candle_close = float(df_daily["close"].iloc[-2])
-    prev_candle_sma20 = float(df_daily["sma20"].iloc[-2])
+    today_low = float(df_daily["low"].iloc[-1])
     cmp = float(df_daily["close"].iloc[-1])
     curr_sma20 = float(df_daily["sma20"].iloc[-1])
 
-    # Fail-fast Condition 4: Previous daily candle close < Previous daily candle SMA 20
-    c4 = prev_candle_close < prev_candle_sma20
+    # Fail-fast Condition 4: Today's low <= Today's Daily SMA 20
+    c4 = today_low <= curr_sma20
     if not c4:
         return False, None
 
@@ -330,7 +329,7 @@ def evaluate_stock(df_daily, check_c5=True):
         .agg({"open": "first", "high": "max", "low": "min", "close": "last", "volume": "sum"})
         .dropna()
     )
-    if len(df_weekly) < 21:
+    if len(df_weekly) < 20:
         return False, None
 
     w_close = float(df_weekly["close"].iloc[-1])
@@ -367,9 +366,8 @@ def evaluate_stock(df_daily, check_c5=True):
         "C2_W_RSI": True,
         "W_BB_Upper": round(w_bb_upper, 2),
         "C3_W_BB": True,
-        "Prev_Candle_Close": round(prev_candle_close, 2),
-        "Prev_Candle_SMA20": round(prev_candle_sma20, 2),
-        "C4_Prev_Candle_Below_SMA": True,
+        "Today_Low": round(today_low, 2),
+        "C4_Today_Low_LTE_SMA20": True,
         "CMP": round(cmp, 2),
         "Daily_SMA20": round(curr_sma20, 2),
         "C5_CMP_Above_SMA": c5 if check_c5 else f"SKIP ({c5})",
@@ -407,8 +405,8 @@ def send_telegram_alert(universe_name, matches, elapsed, match_csv):
         lines = [header + f"✅ *{len(matches)} Match(es) Found:*\n"]
         for m in matches[:25]:
             lines.append(
-                f"• *{m['Symbol']}* | CMP: `{m['CMP']}` | W\\_RSI: `{m['W_RSI']}` | "
-                f"W\\_BB: `{m['W_BB_Upper']}` | PrevC: `{m['Prev_Candle_Close']}`"
+                f"• *{m['Symbol']}* | CMP: `{m['CMP']}` | Low: `{m['Today_Low']}` | "
+                f"W\\_RSI: `{m['W_RSI']}` | W\\_BB: `{m['W_BB_Upper']}`"
             )
         if len(matches) > 25:
             lines.append(f"_...and {len(matches) - 25} more (see attached CSV)_")
@@ -433,8 +431,6 @@ def send_telegram_alert(universe_name, matches, elapsed, match_csv):
         print("Telegram alert sent successfully.")
     except Exception as e:
         print(f"Failed to send Telegram alert: {e}")
-
-
 def process_single_symbol(idx, symbol, smart_api, token_cache, cache_lock, limiter, live_ohlc_map, check_c5, cache_only):
     """Fetches candles (populating cache) and evaluates conditions unless cache_only is set."""
     with cache_lock:
@@ -457,7 +453,7 @@ def process_single_symbol(idx, symbol, smart_api, token_cache, cache_lock, limit
         return idx, symbol, False, None, fetched_new, "SKIP (Token not found)"
 
     df_daily = get_combined_candles(smart_api, symbol, token, limiter, live_ohlc_map)
-    if df_daily is None or len(df_daily) < 105:
+    if df_daily is None or len(df_daily) < 95:
         return idx, symbol, False, None, fetched_new, "SKIP (Insufficient data)"
 
     if cache_only:
@@ -548,7 +544,7 @@ def run_screener():
                         f"W_C:{m['W_Close']} > W_ST:{m['W_ST_7_3']} (Y) | "
                         f"W_RSI:{m['W_RSI']}>60 (Y) | "
                         f"W_C:{m['W_Close']} > W_BB:{m['W_BB_Upper']} (Y) | "
-                        f"PrevC:{m['Prev_Candle_Close']} < PrevSMA:{m['Prev_Candle_SMA20']} (Y) | "
+                        f"TodayLow:{m['Today_Low']} <= SMA20:{m['Daily_SMA20']} (Y) | "
                         f"CMP:{m['CMP']} > SMA20:{m['Daily_SMA20']} ({c5_label})"
                     )
                 elif completed % 250 == 0 or completed == total:
