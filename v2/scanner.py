@@ -74,7 +74,7 @@ def login_smartapi():
 class RateLimiter:
     """Thread-safe rate limiter with global cooldown on rate-limit errors."""
 
-    def __init__(self, max_per_second=1.8):
+    def __init__(self, max_per_second=1.2):
         self.min_interval = 1.0 / max_per_second
         self.lock = threading.Lock()
         self.last_call = 0.0
@@ -91,14 +91,14 @@ class RateLimiter:
                 time.sleep(wait_time)
             self.last_call = time.perf_counter()
 
-    def trigger_cooldown(self, seconds=3.5):
+    def trigger_cooldown(self, seconds=6.0):
         with self.lock:
             self.cooldown_until = max(
                 self.cooldown_until, time.perf_counter() + seconds
             )
 
 
-def call_with_retry(func, limiter, retries=5):
+def call_with_retry(func, limiter, retries=6):
     """Executes a SmartAPI call with global cooldown retry on rate limits."""
     for attempt in range(retries):
         limiter.wait()
@@ -109,7 +109,7 @@ def call_with_retry(func, limiter, retries=5):
             if (
                 "access rate" in err or "couldn't parse" in err or "ab1004" in err
             ) and attempt < retries - 1:
-                limiter.trigger_cooldown(3.5 * (attempt + 1))
+                limiter.trigger_cooldown(6.0 * (attempt + 1))
                 continue
             raise
     return None
@@ -301,7 +301,7 @@ def get_combined_candles(smart_api, symbol, token, limiter, live_ohlc_map):
     return df_hist
 def evaluate_stock(df_daily, check_c5=True):
     """Evaluates the 5 conditions with short-circuit (fail-fast) exits for speed."""
-    if df_daily is None or len(df_daily) < 200:
+    if df_daily is None or len(df_daily) < 105:
         return False, None
 
     df_daily = df_daily.sort_index()
@@ -330,7 +330,7 @@ def evaluate_stock(df_daily, check_c5=True):
         .agg({"open": "first", "high": "max", "low": "min", "close": "last", "volume": "sum"})
         .dropna()
     )
-    if len(df_weekly) < 30:
+    if len(df_weekly) < 21:
         return False, None
 
     w_close = float(df_weekly["close"].iloc[-1])
@@ -346,7 +346,7 @@ def evaluate_stock(df_daily, check_c5=True):
     bbu_cols = [c for c in bb.columns if c.startswith("BBU_20_")]
     if not bbu_cols:
         return False, None
-    w_bb_upper = float(bb[bbu_cols].iloc[-1])
+    w_bb_upper = float(bb[bbu_cols].iloc[-1, 0])
     if pd.isna(w_bb_upper) or not (w_close > w_bb_upper):
         return False, None
 
@@ -355,7 +355,7 @@ def evaluate_stock(df_daily, check_c5=True):
     st_cols = [c for c in st.columns if c.startswith("SUPERT_7_")]
     if not st_cols:
         return False, None
-    w_supertrend = float(st[st_cols].iloc[-1])
+    w_supertrend = float(st[st_cols].iloc[-1, 0])
     if pd.isna(w_supertrend) or not (w_close > w_supertrend):
         return False, None
 
@@ -442,7 +442,7 @@ def process_single_symbol(idx, symbol, smart_api, token_cache, cache_lock, limit
 
     fetched_new = False
     if not token:
-        time.sleep(0.6)
+        time.sleep(0.8)
         res = call_with_retry(lambda: smart_api.searchScrip("NSE", f"{symbol}-EQ"), limiter)
         if res and res.get("status") and res.get("data"):
             for item in res["data"]:
@@ -457,7 +457,7 @@ def process_single_symbol(idx, symbol, smart_api, token_cache, cache_lock, limit
         return idx, symbol, False, None, fetched_new, "SKIP (Token not found)"
 
     df_daily = get_combined_candles(smart_api, symbol, token, limiter, live_ohlc_map)
-    if df_daily is None or len(df_daily) < 200:
+    if df_daily is None or len(df_daily) < 105:
         return idx, symbol, False, None, fetched_new, "SKIP (Insufficient data)"
 
     if cache_only:
@@ -495,7 +495,7 @@ def run_screener():
 
     token_cache = load_token_cache()
     cache_lock = threading.Lock()
-    limiter = RateLimiter(max_per_second=1.8)
+    limiter = RateLimiter(max_per_second=1.2)
     cache_updated = False
 
     live_ohlc_map = {}
@@ -512,7 +512,7 @@ def run_screener():
     mode_label = "CACHE-ONLY" if args.cache_only else f"Condition 5: {c5_status}"
     print(f"Scanning {total} stocks in [{universe_name.upper()}] | {mode_label}\n")
 
-    with ThreadPoolExecutor(max_workers=2) as executor:
+    with ThreadPoolExecutor(max_workers=1) as executor:
         futures = {
             executor.submit(
                 process_single_symbol,
