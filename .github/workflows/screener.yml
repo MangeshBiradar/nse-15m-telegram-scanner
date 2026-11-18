@@ -20,10 +20,12 @@ on:
         type: boolean
         default: false
   schedule:
-    # Sun-Thu at 11:15 PM IST (17:45 UTC) - overnight low-traffic cache load for Mon-Fri mornings
+    # Sun-Thu at 11:15 PM IST (17:45 UTC) - overnight low-traffic cache load
     - cron: '45 17 * * 0-4'
-    # Mon-Fri at 9:30 AM IST (04:00 UTC) - live market scan using overnight cache + Telegram alert
-    - cron: '0 4 * * 1-5'
+    # Mon-Fri every hour from 9:30 AM IST to 2:30 PM IST (04:00 to 09:00 UTC)
+    - cron: '0 4-9 * * 1-5'
+    # Mon-Fri at 3:25 PM IST (09:55 UTC) - final pre-close live scan
+    - cron: '55 9 * * 1-5'
 
 jobs:
   run-screener:
